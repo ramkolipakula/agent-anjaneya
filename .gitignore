@@ -1,0 +1,62 @@
+# Dependencies
+node_modules/
+.pnp
+.pnp.js
+.yarn/*
+!.yarn/patches
+!.yarn/plugins
+!.yarn/releases
+!.yarn/versions
+
+# Next.js
+.next/
+out/
+
+# Expo / React Native
+.expo/
+web-build/
+*.jks
+*.p8
+*.p12
+*.key
+*.mobileprovision
+*.orig.*
+
+# Tauri / Rust
+src-tauri/target/
+
+# Build artifacts
+dist/
+build/
+coverage/
+
+# Database
+*.db
+*.db-journal
+dev.db
+dev.db-journal
+
+# Environment variables
+.env
+.env*.local
+!.env.example
+
+# Logs
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+*.log
+
+# TypeScript
+*.tsbuildinfo
+next-env.d.ts
+
+# OS & Editor
+.DS_Store
+Thumbs.db
+.vscode/*
+!.vscode/extensions.json
+.idea/
+*.swp
+*.swo
