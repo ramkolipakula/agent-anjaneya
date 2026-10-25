@@ -185,7 +185,7 @@ export default function App() {
     await executePairing({ autoPairLocal: true });
   };
 
-  const handleUnpair = () => {
+  const handleUnpair = async () => {
     storage.removeItem('pairedDesktopDeviceId');
     storage.removeItem('mobileDeviceSecret');
     setDesktopDeviceId(null);
@@ -195,6 +195,20 @@ export default function App() {
     if (socket) socket.disconnect();
     setSocket(null);
     addMessage('Device unpaired. You can now pair with a computer.', 'system');
+
+    try {
+      await fetch(`${backendUrl}/api/pairing`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          deviceId,
+          deviceSecret,
+          unpair: true,
+        }),
+      });
+    } catch (e) {
+      // non-blocking
+    }
   };
 
   // Establish Authenticated Socket.io Connection once paired

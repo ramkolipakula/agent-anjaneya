@@ -35,7 +35,7 @@ export default function Home() {
   };
 
   // Fetch / bootstrap pairing session
-  const fetchPairingSession = async (currentDeviceId?: string, currentSecret?: string) => {
+  const fetchPairingSession = async (currentDeviceId?: string, currentSecret?: string, forceUnpair = false) => {
     setIsRefreshing(true);
     try {
       const idToUse = currentDeviceId ?? (typeof window !== "undefined" ? localStorage.getItem("desktopDeviceId") || undefined : undefined);
@@ -48,6 +48,7 @@ export default function Home() {
           deviceId: idToUse,
           deviceSecret: secretToUse,
           deviceName: "Ram-PC",
+          unpair: forceUnpair,
         }),
       });
 
@@ -71,12 +72,16 @@ export default function Home() {
       };
       setPairingPayload(qrData);
 
-      if (data.pairedMobile) {
+      if (data.pairedMobile && !forceUnpair) {
         setPairingStatus("PAIRED");
         setPairedMobileId(data.pairedMobile.deviceId);
         setPairedMobileName(data.pairedMobile.deviceName || "Ram's Phone");
         setPairedMobileStatus(data.pairedMobile.status || "OFFLINE");
         addMessage(`Restored pairing with phone: ${data.pairedMobile.deviceName}`);
+      } else {
+        setPairingStatus("WAITING");
+        setPairedMobileId(null);
+        setPairedMobileStatus("OFFLINE");
       }
     } catch (err: any) {
       console.error("Error creating pairing session:", err);
@@ -216,12 +221,12 @@ export default function Home() {
     setTimeout(() => setCopied(false), 2000);
   };
 
-  const handleUnpair = () => {
+  const handleUnpair = async () => {
     setPairingStatus("WAITING");
     setPairedMobileId(null);
     setPairedMobileStatus("OFFLINE");
     addMessage("Unpaired phone. Ready to pair new device.");
-    fetchPairingSession();
+    await fetchPairingSession(undefined, undefined, true);
   };
 
   if (!isMounted) {

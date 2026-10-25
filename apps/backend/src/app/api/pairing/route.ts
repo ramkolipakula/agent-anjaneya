@@ -48,7 +48,7 @@ export async function GET(req: Request) {
 export async function POST(req: Request) {
   const cors = getCorsHeaders(req);
   try {
-    const { deviceId, deviceName, deviceSecret } = await req.json();
+    const { deviceId, deviceName, deviceSecret, unpair } = await req.json();
 
     // Ensure base user exists
     await prisma.user.upsert({
@@ -94,6 +94,40 @@ export async function POST(req: Request) {
       });
     }
 
+    // If explicit unpair requested, deactivate any active connections for this device
+    if (unpair && device) {
+      const activeConns = await prisma.deviceConnection.findMany({
+        where: {
+          status: "ACTIVE",
+          OR: [{ desktopDeviceId: device.id }, { mobileDeviceId: device.id }],
+        },
+      });
+
+      await prisma.deviceConnection.updateMany({
+        where: {
+          status: "ACTIVE",
+          OR: [{ desktopDeviceId: device.id }, { mobileDeviceId: device.id }],
+        },
+        data: {
+          status: "INACTIVE",
+        },
+      });
+
+      const io = (globalThis as any).io;
+      if (io) {
+        for (const conn of activeConns) {
+          const targetId = conn.mobileDeviceId === device.id ? conn.desktopDeviceId : conn.mobileDeviceId;
+          io.to(targetId).emit("message", {
+            id: generateSecureToken(8),
+            type: "DEVICE_DISCONNECTED",
+            timestamp: new Date().toISOString(),
+            sourceDeviceId: device.id,
+            targetDeviceId: targetId,
+          });
+        }
+      }
+    }
+
     // Invalidate any previous ACTIVE pairing sessions for this desktop
     await prisma.pairingSession.updateMany({
       where: {
@@ -122,15 +156,18 @@ export async function POST(req: Request) {
       },
     });
 
-    const existingConnection = await prisma.deviceConnection.findFirst({
-      where: {
-        desktopDeviceId: device.id,
-        status: "ACTIVE",
-      },
-      include: {
-        mobileDevice: true,
-      },
-    });
+    let existingConnection = null;
+    if (!unpair) {
+      existingConnection = await prisma.deviceConnection.findFirst({
+        where: {
+          desktopDeviceId: device.id,
+          status: "ACTIVE",
+        },
+        include: {
+          mobileDevice: true,
+        },
+      });
+    }
 
     return NextResponse.json(
       {
