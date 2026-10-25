@@ -8,7 +8,7 @@
   ],
   "scripts": {
     "build": "npm run build --workspace=@agent-anjaneya/protocol && npm run build --workspace=backend && npm run build --workspace=desktop",
-    "test": "npm run test --workspace=backend",
+    "test": "npm run test --workspace=backend && npm run test --workspace=desktop",
     "backend": "npm run dev --workspace=backend",
     "desktop": "npm run dev --workspace=desktop",
     "mobile": "npm run web --workspace=mobile"

@@ -193,7 +193,41 @@ app.prepare().then(() => {
         return;
       }
 
-      // 5. Task creation persistence
+      // 5. Handle TASK_SYNC for reconnect recovery
+      if (msg.type === "TASK_SYNC") {
+        try {
+          const tasks = await prisma.task.findMany({
+            where: {
+              userId,
+              OR: [
+                { desktopDeviceId: deviceId },
+                { createdByDeviceId: deviceId },
+              ],
+            },
+            include: {
+              events: {
+                orderBy: { createdAt: "asc" },
+              },
+            },
+            orderBy: { createdAt: "desc" },
+            take: 25,
+          });
+
+          socket.emit("message", {
+            id: Math.random().toString(36).substring(7),
+            type: "TASK_SYNC_RESPONSE",
+            timestamp: new Date().toISOString(),
+            sourceDeviceId: "server",
+            targetDeviceId: deviceId,
+            payload: { tasks },
+          } as RealtimeMessage);
+          return;
+        } catch (e) {
+          console.error("[Socket] Failed to sync tasks:", e);
+        }
+      }
+
+      // 6. Task creation persistence
       if (msg.type === "TASK_CREATED") {
         try {
           const task = await prisma.task.create({
@@ -219,9 +253,42 @@ app.prepare().then(() => {
         } catch (e) {
           console.error("[Socket] Failed to persist task:", e);
         }
+      } else if (msg.payload?.taskId && msg.type.startsWith("TASK_")) {
+        // Persist all subsequent task events and update state machine transitions
+        const taskId = msg.payload.taskId;
+        try {
+          let newStatus: string | undefined;
+          if (msg.type === "TASK_RECEIVED") newStatus = "RECEIVED";
+          else if (msg.type === "TASK_PLANNING") newStatus = "PLANNING";
+          else if (msg.type === "TASK_APPROVAL_REQUEST") newStatus = "WAITING_FOR_APPROVAL";
+          else if (msg.type === "TASK_APPROVAL_RESPONSE") newStatus = msg.payload.approved ? "APPROVED" : "CANCELLED";
+          else if (msg.type === "TASK_PROGRESS" && msg.payload.status) newStatus = msg.payload.status;
+          else if (msg.type === "TASK_VERIFYING") newStatus = "VERIFYING";
+          else if (msg.type === "TASK_COMPLETED") newStatus = "COMPLETED";
+          else if (msg.type === "TASK_FAILED") newStatus = "FAILED";
+          else if (msg.type === "TASK_CANCEL" || msg.type === "TASK_CANCELLED") newStatus = "CANCELLED";
+
+          if (newStatus) {
+            await prisma.task.update({
+              where: { id: taskId },
+              data: { status: newStatus },
+            });
+          }
+
+          await prisma.taskEvent.create({
+            data: {
+              taskId,
+              eventType: msg.type,
+              sourceDeviceId: deviceId,
+              payload: JSON.stringify(msg.payload || {}),
+            },
+          });
+        } catch (e) {
+          console.error(`[Socket] Failed to persist task event for ${taskId}:`, e);
+        }
       }
 
-      // 6. Deliver securely to authorized target device room
+      // 7. Deliver securely to authorized target device room
       io.to(msg.targetDeviceId).emit("message", msg);
     });
 

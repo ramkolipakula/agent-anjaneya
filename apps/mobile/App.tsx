@@ -1,5 +1,14 @@
 import React, { useState, useEffect, useRef } from 'react';
-import { StyleSheet, Text, View, TextInput, TouchableOpacity, ScrollView, Platform, ActivityIndicator } from 'react-native';
+import {
+  StyleSheet,
+  Text,
+  View,
+  TextInput,
+  TouchableOpacity,
+  ScrollView,
+  Platform,
+  ActivityIndicator,
+} from 'react-native';
 import { CameraView, useCameraPermissions } from 'expo-camera';
 import { io, Socket } from 'socket.io-client';
 import { DeviceStatus, RealtimeMessage } from '@agent-anjaneya/protocol';
@@ -31,6 +40,16 @@ const storage = {
   },
 };
 
+interface ApprovalRequest {
+  taskId: string;
+  title: string;
+  intent: string;
+  operation: any;
+  sourceFile?: string;
+  outputFile?: string;
+  details?: string;
+}
+
 export default function App() {
   const [permission, requestPermission] = useCameraPermissions();
   const [scanning, setScanning] = useState(false);
@@ -49,15 +68,47 @@ export default function App() {
   const [backendUrl, setBackendUrl] = useState(DEFAULT_BACKEND_URL);
 
   const [socket, setSocket] = useState<Socket | null>(null);
-  const [messages, setMessages] = useState<{ time: string; text: string; sender: 'user' | 'system'; latency?: number }[]>([]);
+  const [messages, setMessages] = useState<{
+    id: string;
+    time: string;
+    text: string;
+    sender: 'user' | 'agent' | 'system';
+    latency?: number;
+    step?: string;
+    outputPath?: string;
+    isError?: boolean;
+    isSuccess?: boolean;
+  }[]>([]);
+
+  // Task execution state
+  const [commandInput, setCommandInput] = useState('');
+  const [isTaskRunning, setIsTaskRunning] = useState(false);
+  const [activeApproval, setActiveApproval] = useState<ApprovalRequest | null>(null);
+  const [activeTaskId, setActiveTaskId] = useState<string | null>(null);
+
   const sentTimeRef = useRef<number | null>(null);
   const deviceIdRef = useRef<string>(deviceId);
   deviceIdRef.current = deviceId;
   const desktopDeviceIdRef = useRef<string | null>(desktopDeviceId);
   desktopDeviceIdRef.current = desktopDeviceId;
+  const socketRef = useRef<Socket | null>(socket);
+  socketRef.current = socket;
 
-  const addMessage = (text: string, sender: 'user' | 'system' = 'system', latency?: number) => {
-    setMessages(prev => [...prev, { time: new Date().toLocaleTimeString(), text, sender, latency }]);
+  const addMessage = (
+    text: string,
+    sender: 'user' | 'agent' | 'system' = 'system',
+    opts?: { latency?: number; step?: string; outputPath?: string; isError?: boolean; isSuccess?: boolean }
+  ) => {
+    setMessages((prev) => [
+      ...prev,
+      {
+        id: Math.random().toString(36).substring(7),
+        time: new Date().toLocaleTimeString(),
+        text,
+        sender,
+        ...opts,
+      },
+    ]);
   };
 
   // Restore stored session on mount
@@ -144,18 +195,14 @@ export default function App() {
     if (isPairingLoading) return;
     try {
       const trimmed = data.trim();
-      if (!trimmed.startsWith('{') || !trimmed.endsWith('}')) {
-        return;
-      }
+      if (!trimmed.startsWith('{') || !trimmed.endsWith('}')) return;
       const payload = JSON.parse(trimmed);
       if (!payload.pairingSessionId || !payload.pairingToken) {
         setPairingError('QR code missing pairing token/session.');
         return;
       }
       await executePairing(payload);
-    } catch (e) {
-      // ignore non-json frames
-    }
+    } catch (e) {}
   };
 
   const handleManualPairing = async () => {
@@ -200,15 +247,9 @@ export default function App() {
       await fetch(`${backendUrl}/api/pairing`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          deviceId,
-          deviceSecret,
-          unpair: true,
-        }),
+        body: JSON.stringify({ deviceId, deviceSecret, unpair: true }),
       });
-    } catch (e) {
-      // non-blocking
-    }
+    } catch (e) {}
   };
 
   // Establish Authenticated Socket.io Connection once paired
@@ -218,10 +259,7 @@ export default function App() {
     setConnectionStatus('CONNECTING');
 
     const newSocket = io(backendUrl, {
-      auth: {
-        deviceId,
-        deviceSecret,
-      },
+      auth: { deviceId, deviceSecret },
       reconnection: true,
       reconnectionAttempts: Infinity,
       reconnectionDelay: 2000,
@@ -230,34 +268,82 @@ export default function App() {
     setSocket(newSocket);
 
     newSocket.on('connect', () => {
-      console.log('[Socket] Mobile connected to server');
       setConnectionStatus('ONLINE');
-      addMessage('Mobile authenticated and connected to server.', 'system');
+      addMessage('Mobile authenticated and connected.', 'system');
+
+      // Request task sync on connect/reconnect
+      newSocket.emit('message', {
+        id: Math.random().toString(36).substring(7),
+        type: 'TASK_SYNC',
+        timestamp: new Date().toISOString(),
+        sourceDeviceId: deviceId,
+        targetDeviceId: desktopDeviceId,
+      });
     });
 
-    newSocket.on('connect_error', (err) => {
-      console.warn('[Socket] Mobile connect error:', err.message);
+    newSocket.on('connect_error', () => {
       setConnectionStatus('RECONNECTING');
     });
 
-    newSocket.on('disconnect', (reason) => {
-      console.log('[Socket] Mobile disconnected:', reason);
+    newSocket.on('disconnect', () => {
       setConnectionStatus('OFFLINE');
       addMessage('Disconnected from server.', 'system');
     });
 
     newSocket.on('message', (msg: RealtimeMessage) => {
-      console.log('[Socket] Mobile received:', msg);
+      console.log('[Socket] Mobile received message:', msg);
 
+      // 1. Task Progress Events
+      if (msg.type === 'TASK_PROGRESS') {
+        const message = msg.payload?.message;
+        if (message) {
+          addMessage(`"${message}"`, 'agent', { step: msg.payload?.step });
+        }
+      }
+
+      // 2. Task Approval Request
+      if (msg.type === 'TASK_APPROVAL_REQUEST') {
+        setActiveApproval(msg.payload);
+        addMessage(`Approval requested for: ${msg.payload?.title || 'Task'}`, 'system');
+      }
+
+      // 3. Task Completed Event
       if (msg.type === 'TASK_COMPLETED') {
         let latency: number | undefined;
         if (sentTimeRef.current) {
           latency = Date.now() - sentTimeRef.current;
           sentTimeRef.current = null;
         }
-        addMessage(`Computer: "${msg.payload?.text}"`, 'system', latency);
+
+        const summary = msg.payload?.summary || msg.payload?.text || 'Task completed successfully.';
+        const outPath = msg.payload?.outputPath;
+        addMessage(summary, 'agent', {
+          latency,
+          outputPath: outPath,
+          isSuccess: true,
+        });
+
+        setIsTaskRunning(false);
+        setActiveApproval(null);
       }
 
+      // 4. Task Failed Event
+      if (msg.type === 'TASK_FAILED') {
+        const err = msg.payload?.error || 'Task execution failed.';
+        addMessage(`Error: ${err}`, 'agent', { isError: true });
+        setIsTaskRunning(false);
+        setActiveApproval(null);
+      }
+
+      // 5. Task Cancelled Event
+      if (msg.type === 'TASK_CANCELLED') {
+        const reason = msg.payload?.reason || 'Task was cancelled.';
+        addMessage(`Notice: ${reason}`, 'system');
+        setIsTaskRunning(false);
+        setActiveApproval(null);
+      }
+
+      // 6. Device status sync
       if (msg.type === 'DEVICE_DISCONNECTED' && msg.sourceDeviceId === desktopDeviceIdRef.current) {
         setDesktopStatus('OFFLINE');
         addMessage('Computer went OFFLINE.', 'system');
@@ -278,12 +364,18 @@ export default function App() {
     };
   }, [desktopDeviceId, deviceSecret, backendUrl, deviceId]);
 
-  const sendTestCommand = () => {
-    if (!socket || connectionStatus !== 'ONLINE' || !desktopDeviceId) return;
+  // Send Natural Language Task Command
+  const handleSendCommand = (textToSend?: string) => {
+    const text = (textToSend ?? commandInput).trim();
+    if (!text || !socket || connectionStatus !== 'ONLINE' || !desktopDeviceId) return;
 
-    const text = 'Hello from my phone.';
+    const taskId = 'task-' + Math.random().toString(36).substring(2, 9);
+    setActiveTaskId(taskId);
+    setIsTaskRunning(true);
     sentTimeRef.current = Date.now();
+
     addMessage(text, 'user');
+    setCommandInput('');
 
     socket.emit('message', {
       id: Math.random().toString(36).substring(7),
@@ -291,8 +383,46 @@ export default function App() {
       timestamp: new Date().toISOString(),
       sourceDeviceId: deviceId,
       targetDeviceId: desktopDeviceId,
-      payload: { text },
+      payload: { text, taskId },
     });
+  };
+
+  // Handle User Approval Response
+  const handleApprovalResponse = (approved: boolean) => {
+    if (!socket || !desktopDeviceId || !activeApproval) return;
+
+    addMessage(approved ? 'Approved execution.' : 'Cancelled task.', 'user');
+
+    socket.emit('message', {
+      id: Math.random().toString(36).substring(7),
+      type: 'TASK_APPROVAL_RESPONSE',
+      timestamp: new Date().toISOString(),
+      sourceDeviceId: deviceId,
+      targetDeviceId: desktopDeviceId,
+      payload: {
+        taskId: activeApproval.taskId,
+        approved,
+        reason: approved ? undefined : 'Rejected by user on phone',
+      },
+    });
+
+    setActiveApproval(null);
+  };
+
+  // Cancel Running Task
+  const handleCancelTask = () => {
+    if (!socket || !desktopDeviceId || !activeTaskId) return;
+
+    socket.emit('message', {
+      id: Math.random().toString(36).substring(7),
+      type: 'TASK_CANCEL',
+      timestamp: new Date().toISOString(),
+      sourceDeviceId: deviceId,
+      targetDeviceId: desktopDeviceId,
+      payload: { taskId: activeTaskId, reason: 'Cancelled by user on mobile' },
+    });
+
+    addMessage('Requesting task cancellation...', 'user');
   };
 
   // Pre-pairing screen
@@ -326,9 +456,7 @@ export default function App() {
                 <CameraView
                   style={styles.camera}
                   onBarcodeScanned={handleScan}
-                  barcodeScannerSettings={{
-                    barcodeTypes: ['qr'],
-                  }}
+                  barcodeScannerSettings={{ barcodeTypes: ['qr'] }}
                 />
               ) : (
                 <View style={styles.permissionBox}>
@@ -362,11 +490,7 @@ export default function App() {
                 onPress={handlePinPairing}
                 disabled={isPairingLoading}
               >
-                {isPairingLoading ? (
-                  <ActivityIndicator color="#fff" />
-                ) : (
-                  <Text style={styles.buttonText}>Connect with PIN</Text>
-                )}
+                {isPairingLoading ? <ActivityIndicator color="#fff" /> : <Text style={styles.buttonText}>Connect with PIN</Text>}
               </TouchableOpacity>
               <TouchableOpacity
                 style={[styles.buttonSecondary, { marginTop: 8 }]}
@@ -391,11 +515,7 @@ export default function App() {
                 onPress={handleManualPairing}
                 disabled={isPairingLoading}
               >
-                {isPairingLoading ? (
-                  <ActivityIndicator color="#fff" />
-                ) : (
-                  <Text style={styles.buttonText}>Pair Device</Text>
-                )}
+                {isPairingLoading ? <ActivityIndicator color="#fff" /> : <Text style={styles.buttonText}>Pair Device</Text>}
               </TouchableOpacity>
               <TouchableOpacity
                 style={[styles.buttonSecondary, { marginTop: 8 }]}
@@ -406,7 +526,6 @@ export default function App() {
             </View>
           ) : (
             <View style={{ gap: 10, marginTop: 12 }}>
-              {/* 1-Click Fast Connect for same-machine testing */}
               <TouchableOpacity
                 style={[styles.buttonPrimary, { backgroundColor: '#1f6feb' }]}
                 onPress={handleAutoPairLocal}
@@ -456,9 +575,10 @@ export default function App() {
     );
   }
 
-  // Paired Main Screen
+  // Paired Main Screen with Natural Language Execution
   return (
     <View style={styles.container}>
+      {/* Top Header */}
       <View style={styles.headerBar}>
         <View style={{ flex: 1 }}>
           <Text style={styles.headerTitle}>Ram-PC</Text>
@@ -493,39 +613,144 @@ export default function App() {
         </View>
       </View>
 
+      {/* Suggestion Chips */}
+      <View style={styles.chipsContainer}>
+        <ScrollView horizontal showsHorizontalScrollIndicator={false} contentContainerStyle={{ gap: 8 }}>
+          <TouchableOpacity
+            style={styles.chip}
+            onPress={() => handleSendCommand('Find video.mp4 in my Videos folder and extract the first 10 seconds')}
+            disabled={isTaskRunning || desktopStatus !== 'ONLINE'}
+          >
+            <Text style={styles.chipText}>🎬 Trim first 10s of video.mp4</Text>
+          </TouchableOpacity>
+          <TouchableOpacity
+            style={styles.chip}
+            onPress={() => handleSendCommand('List allowed folders')}
+            disabled={isTaskRunning || desktopStatus !== 'ONLINE'}
+          >
+            <Text style={styles.chipText}>📁 List allowed folders</Text>
+          </TouchableOpacity>
+          <TouchableOpacity
+            style={styles.chip}
+            onPress={() => handleSendCommand('Find document.pdf in Documents')}
+            disabled={isTaskRunning || desktopStatus !== 'ONLINE'}
+          >
+            <Text style={styles.chipText}>📄 Find document.pdf</Text>
+          </TouchableOpacity>
+        </ScrollView>
+      </View>
+
+      {/* Chat / Timeline Area */}
       <ScrollView style={styles.chatArea} contentContainerStyle={{ padding: 16 }}>
-        {messages.map((m, i) => (
+        {messages.map((m) => (
           <View
-            key={i}
+            key={m.id}
             style={[
               styles.messageBubble,
-              m.sender === 'user' ? styles.userBubble : styles.systemBubble,
+              m.sender === 'user'
+                ? styles.userBubble
+                : m.sender === 'agent'
+                ? m.isError
+                  ? styles.errorBubble
+                  : m.isSuccess
+                  ? styles.successBubble
+                  : styles.agentBubble
+                : styles.systemBubble,
             ]}
           >
+            {m.sender === 'agent' && (
+              <Text style={styles.agentPrefix}>Agent Anjaneya</Text>
+            )}
             <Text style={styles.messageText}>{m.text}</Text>
+
+            {m.outputPath && (
+              <View style={styles.outputBox}>
+                <Text style={styles.outputLabel}>OUTPUT PATH:</Text>
+                <Text style={styles.outputPathText} selectable>
+                  {m.outputPath}
+                </Text>
+              </View>
+            )}
+
             <View style={styles.metaRow}>
               <Text style={styles.metaTime}>{m.time}</Text>
               {m.latency !== undefined && (
-                <Text style={styles.metaLatency}>RTT: {m.latency}ms</Text>
+                <Text style={styles.metaLatency}>Round-Trip: {m.latency}ms</Text>
               )}
             </View>
           </View>
         ))}
+
+        {/* Interactive Approval Card */}
+        {activeApproval && (
+          <View style={styles.approvalCard}>
+            <View style={styles.approvalHeader}>
+              <Text style={styles.approvalTitle}>⚠️ Task Approval Requested</Text>
+            </View>
+            <Text style={styles.approvalTaskName}>{activeApproval.title}</Text>
+            {activeApproval.details && (
+              <Text style={styles.approvalDetails}>{activeApproval.details}</Text>
+            )}
+            {activeApproval.outputFile && (
+              <Text style={styles.approvalOutput}>Target Output: {activeApproval.outputFile}</Text>
+            )}
+
+            <View style={styles.approvalActions}>
+              <TouchableOpacity
+                style={styles.approveButton}
+                onPress={() => handleApprovalResponse(true)}
+              >
+                <Text style={styles.approveButtonText}>Approve Execution</Text>
+              </TouchableOpacity>
+              <TouchableOpacity
+                style={styles.rejectButton}
+                onPress={() => handleApprovalResponse(false)}
+              >
+                <Text style={styles.rejectButtonText}>Cancel</Text>
+              </TouchableOpacity>
+            </View>
+          </View>
+        )}
       </ScrollView>
 
+      {/* Task Input Footer */}
       <View style={styles.footer}>
-        <TouchableOpacity
-          style={[
-            styles.actionButton,
-            (connectionStatus !== 'ONLINE' || desktopStatus !== 'ONLINE') && styles.buttonDisabled,
-          ]}
-          onPress={sendTestCommand}
-          disabled={connectionStatus !== 'ONLINE' || desktopStatus !== 'ONLINE'}
-        >
-          <Text style={styles.actionButtonText}>
-            {desktopStatus === 'ONLINE' ? 'Send: "Hello from my phone."' : 'Computer is OFFLINE'}
-          </Text>
-        </TouchableOpacity>
+        {isTaskRunning && (
+          <View style={styles.runningBanner}>
+            <ActivityIndicator size="small" color="#58a6ff" />
+            <Text style={styles.runningBannerText}>Computer is executing task...</Text>
+            <TouchableOpacity onPress={handleCancelTask} style={styles.cancelRunButton}>
+              <Text style={styles.cancelRunButtonText}>Stop</Text>
+            </TouchableOpacity>
+          </View>
+        )}
+
+        <View style={styles.inputRow}>
+          <TextInput
+            style={styles.commandInput}
+            value={commandInput}
+            onChangeText={setCommandInput}
+            placeholder={
+              desktopStatus === 'ONLINE'
+                ? 'Type command (e.g. Find video.mp4 and extract 10s)...'
+                : 'Computer is OFFLINE'
+            }
+            placeholderTextColor="#8b949e"
+            editable={desktopStatus === 'ONLINE'}
+            onSubmitEditing={() => handleSendCommand()}
+            returnKeyType="send"
+          />
+          <TouchableOpacity
+            style={[
+              styles.sendButton,
+              (!commandInput.trim() || desktopStatus !== 'ONLINE') && styles.buttonDisabled,
+            ]}
+            onPress={() => handleSendCommand()}
+            disabled={!commandInput.trim() || desktopStatus !== 'ONLINE'}
+          >
+            <Text style={styles.sendButtonText}>Send</Text>
+          </TouchableOpacity>
+        </View>
       </View>
     </View>
   );
@@ -690,11 +915,31 @@ const styles = StyleSheet.create({
     fontSize: 11,
     fontWeight: '600',
   },
+  chipsContainer: {
+    backgroundColor: '#161b22',
+    paddingVertical: 8,
+    paddingHorizontal: 12,
+    borderBottomWidth: 1,
+    borderBottomColor: '#21262d',
+  },
+  chip: {
+    backgroundColor: '#21262d',
+    borderWidth: 1,
+    borderColor: '#30363d',
+    borderRadius: 16,
+    paddingHorizontal: 12,
+    paddingVertical: 6,
+  },
+  chipText: {
+    color: '#c9d1d9',
+    fontSize: 12,
+    fontWeight: '500',
+  },
   chatArea: {
     flex: 1,
   },
   messageBubble: {
-    maxWidth: '85%',
+    maxWidth: '88%',
     padding: 12,
     borderRadius: 12,
     marginBottom: 10,
@@ -704,6 +949,27 @@ const styles = StyleSheet.create({
     backgroundColor: '#1f6feb',
     borderBottomRightRadius: 2,
   },
+  agentBubble: {
+    alignSelf: 'flex-start',
+    backgroundColor: '#161b22',
+    borderWidth: 1,
+    borderColor: '#30363d',
+    borderBottomLeftRadius: 2,
+  },
+  successBubble: {
+    alignSelf: 'flex-start',
+    backgroundColor: 'rgba(46, 160, 67, 0.15)',
+    borderWidth: 1,
+    borderColor: '#2ea043',
+    borderBottomLeftRadius: 2,
+  },
+  errorBubble: {
+    alignSelf: 'flex-start',
+    backgroundColor: 'rgba(248, 81, 73, 0.15)',
+    borderWidth: 1,
+    borderColor: '#f85149',
+    borderBottomLeftRadius: 2,
+  },
   systemBubble: {
     alignSelf: 'flex-start',
     backgroundColor: '#21262d',
@@ -711,16 +977,43 @@ const styles = StyleSheet.create({
     borderColor: '#30363d',
     borderBottomLeftRadius: 2,
   },
+  agentPrefix: {
+    fontSize: 10,
+    fontWeight: '700',
+    color: '#58a6ff',
+    textTransform: 'uppercase',
+    letterSpacing: 0.5,
+    marginBottom: 4,
+  },
   messageText: {
     color: '#ffffff',
     fontSize: 14,
     lineHeight: 20,
   },
+  outputBox: {
+    marginTop: 8,
+    padding: 8,
+    backgroundColor: '#0d1117',
+    borderRadius: 6,
+    borderWidth: 1,
+    borderColor: '#30363d',
+  },
+  outputLabel: {
+    fontSize: 10,
+    fontWeight: '700',
+    color: '#7ee787',
+    marginBottom: 2,
+  },
+  outputPathText: {
+    fontFamily: Platform.OS === 'ios' ? 'Courier' : 'monospace',
+    fontSize: 11,
+    color: '#e6edf3',
+  },
   metaRow: {
     flexDirection: 'row',
     justifyContent: 'space-between',
     alignItems: 'center',
-    marginTop: 4,
+    marginTop: 6,
     gap: 8,
   },
   metaTime: {
@@ -732,25 +1025,139 @@ const styles = StyleSheet.create({
     color: '#7ee787',
     fontWeight: '700',
   },
+  approvalCard: {
+    backgroundColor: '#1f242c',
+    borderWidth: 1,
+    borderColor: '#d29922',
+    borderRadius: 14,
+    padding: 14,
+    marginVertical: 8,
+  },
+  approvalHeader: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    marginBottom: 6,
+  },
+  approvalTitle: {
+    color: '#e3b341',
+    fontWeight: '700',
+    fontSize: 13,
+    textTransform: 'uppercase',
+    letterSpacing: 0.5,
+  },
+  approvalTaskName: {
+    color: '#ffffff',
+    fontSize: 15,
+    fontWeight: '700',
+    marginBottom: 4,
+  },
+  approvalDetails: {
+    color: '#8b949e',
+    fontSize: 13,
+    marginBottom: 4,
+  },
+  approvalOutput: {
+    color: '#58a6ff',
+    fontSize: 12,
+    fontFamily: Platform.OS === 'ios' ? 'Courier' : 'monospace',
+    marginBottom: 12,
+  },
+  approvalActions: {
+    flexDirection: 'row',
+    gap: 8,
+    marginTop: 4,
+  },
+  approveButton: {
+    flex: 1,
+    backgroundColor: '#238636',
+    paddingVertical: 10,
+    borderRadius: 8,
+    alignItems: 'center',
+  },
+  approveButtonText: {
+    color: '#ffffff',
+    fontWeight: '700',
+    fontSize: 13,
+  },
+  rejectButton: {
+    paddingHorizontal: 16,
+    paddingVertical: 10,
+    backgroundColor: '#21262d',
+    borderWidth: 1,
+    borderColor: '#da3633',
+    borderRadius: 8,
+    alignItems: 'center',
+  },
+  rejectButtonText: {
+    color: '#f85149',
+    fontWeight: '600',
+    fontSize: 13,
+  },
   footer: {
-    padding: 16,
+    padding: 12,
     backgroundColor: '#161b22',
     borderTopWidth: 1,
     borderTopColor: '#30363d',
   },
-  actionButton: {
-    backgroundColor: '#238636',
-    paddingVertical: 14,
-    borderRadius: 8,
+  runningBanner: {
+    flexDirection: 'row',
     alignItems: 'center',
+    justifyContent: 'space-between',
+    backgroundColor: '#0d1117',
+    paddingHorizontal: 12,
+    paddingVertical: 8,
+    borderRadius: 8,
+    borderWidth: 1,
+    borderColor: '#1f6feb',
+    marginBottom: 8,
   },
-  actionButtonText: {
+  runningBannerText: {
+    color: '#58a6ff',
+    fontSize: 12,
+    fontWeight: '600',
+    flex: 1,
+    marginLeft: 8,
+  },
+  cancelRunButton: {
+    paddingHorizontal: 10,
+    paddingVertical: 4,
+    backgroundColor: '#21262d',
+    borderRadius: 6,
+  },
+  cancelRunButtonText: {
+    color: '#f85149',
+    fontSize: 11,
+    fontWeight: '600',
+  },
+  inputRow: {
+    flexDirection: 'row',
+    gap: 8,
+  },
+  commandInput: {
+    flex: 1,
+    backgroundColor: '#0d1117',
+    borderWidth: 1,
+    borderColor: '#30363d',
+    borderRadius: 10,
+    paddingHorizontal: 12,
+    paddingVertical: 10,
     color: '#ffffff',
-    fontSize: 15,
+    fontSize: 14,
+  },
+  sendButton: {
+    backgroundColor: '#238636',
+    paddingHorizontal: 18,
+    borderRadius: 10,
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  sendButtonText: {
+    color: '#ffffff',
+    fontSize: 14,
     fontWeight: '700',
   },
   buttonDisabled: {
     backgroundColor: '#21262d',
-    opacity: 0.6,
+    opacity: 0.5,
   },
 });

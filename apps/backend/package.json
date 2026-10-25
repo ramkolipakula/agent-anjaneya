@@ -8,7 +8,7 @@
     "start": "NODE_ENV=production tsx server.ts",
     "lint": "eslint",
     "prisma": "prisma",
-    "test": "tsx tests/security-pairing.test.ts"
+    "test": "tsx tests/security-pairing.test.ts && tsx tests/task-lifecycle-security.test.ts"
   },
   "dependencies": {
     "@agent-anjaneya/protocol": "*",

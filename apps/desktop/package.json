@@ -5,17 +5,19 @@
   "scripts": {
     "dev": "next dev -p 3001",
     "build": "next build",
-    "start": "next start -p 3001",
-    "lint": "eslint"
+    "lint": "eslint",
+    "test": "tsx tests/engine-security.test.ts && tsx tests/e2e-task-execution.test.ts"
   },
   "dependencies": {
+    "@agent-anjaneya/protocol": "*",
+    "ffmpeg-static": "^5.3.0",
+    "lucide-react": "^0.468.0",
     "next": "16.3.8",
+    "qrcode.react": "^4.0.1",
     "react": "19.2.8",
     "react-dom": "19.2.8",
-    "@agent-anjaneya/protocol": "*",
     "socket.io-client": "^4.7.2",
-    "qrcode.react": "^4.0.1",
-    "lucide-react": "^0.468.0"
+    "zod": "^4.6.7"
   },
   "devDependencies": {
     "@tailwindcss/postcss": "^4",
