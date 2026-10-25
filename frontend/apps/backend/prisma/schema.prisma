@@ -1,0 +1,100 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "sqlite"
+  url      = "file:./dev.db"
+}
+
+model User {
+  id          String             @id @default(uuid())
+  email       String             @unique
+  devices     Device[]
+  connections DeviceConnection[]
+  tasks       Task[]
+  createdAt   DateTime           @default(now())
+  updatedAt   DateTime           @updatedAt
+}
+
+model Device {
+  id               String   @id @default(uuid())
+  userId           String
+  user             User     @relation(fields: [userId], references: [id])
+  deviceType       String
+  deviceName       String
+  platform         String
+  appVersion       String
+  deviceSecretHash String
+  status           String   @default("OFFLINE")
+  lastSeenAt       DateTime @default(now())
+  createdAt        DateTime @default(now())
+  updatedAt        DateTime @updatedAt
+
+  createdTasks    Task[]             @relation("CreatedTasks")
+  desktopTasks    Task[]             @relation("DesktopTasks")
+  pairingSessions PairingSession[]
+  mobileConnections DeviceConnection[] @relation("MobileConnections")
+  desktopConnections DeviceConnection[] @relation("DesktopConnections")
+}
+
+model PairingSession {
+  id              String   @id @default(uuid())
+  desktopDeviceId String
+  desktopDevice   Device   @relation(fields: [desktopDeviceId], references: [id])
+  tokenHash       String   @unique
+  pinCode         String?
+  status          String   @default("ACTIVE")
+  expiresAt       DateTime
+  usedAt          DateTime?
+  createdAt       DateTime @default(now())
+}
+
+model DeviceConnection {
+  id              String   @id @default(uuid())
+  userId          String
+  user            User     @relation(fields: [userId], references: [id])
+  mobileDeviceId  String
+  mobileDevice    Device   @relation("MobileConnections", fields: [mobileDeviceId], references: [id])
+  desktopDeviceId String
+  desktopDevice   Device   @relation("DesktopConnections", fields: [desktopDeviceId], references: [id])
+  status          String   @default("ACTIVE")
+  createdAt       DateTime @default(now())
+  updatedAt       DateTime @updatedAt
+
+  @@unique([mobileDeviceId, desktopDeviceId])
+}
+
+model Task {
+  id                 String   @id @default(uuid())
+  userId             String
+  user               User     @relation(fields: [userId], references: [id])
+  desktopDeviceId    String
+  desktopDevice      Device   @relation("DesktopTasks", fields: [desktopDeviceId], references: [id])
+  createdByDeviceId  String
+  createdByDevice    Device   @relation("CreatedTasks", fields: [createdByDeviceId], references: [id])
+  inputText          String
+  status             String   @default("CREATED")
+  createdAt          DateTime @default(now())
+  updatedAt          DateTime @updatedAt
+  events             TaskEvent[]
+}
+
+model TaskEvent {
+  id             String   @id @default(uuid())
+  taskId         String
+  task           Task     @relation(fields: [taskId], references: [id])
+  eventType      String
+  payload        String?
+  sourceDeviceId String
+  createdAt      DateTime @default(now())
+}
+
+model Notification {
+  id        String   @id @default(uuid())
+  deviceId  String
+  title     String
+  body      String
+  read      Boolean  @default(false)
+  createdAt DateTime @default(now())
+}

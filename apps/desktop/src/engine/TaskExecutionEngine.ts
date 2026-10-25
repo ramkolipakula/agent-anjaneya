@@ -2,12 +2,15 @@ import {
   TaskStatus,
   TaskPlan,
   isValidTaskTransition,
+  isTerminalTaskStatus,
   canCancelTask,
   TaskApprovalRequestPayload,
   TaskProgressPayload,
   TaskCompletedPayload,
   TaskFailedPayload,
 } from "@agent-anjaneya/protocol";
+import fs from "fs";
+import os from "os";
 import path from "path";
 import { SecureFileSystem } from "./filesystem/SecureFileSystem";
 import { ToolRegistry } from "./tools/ToolRegistry";
@@ -51,12 +54,24 @@ export class TaskExecutionEngine {
   private planner: TaskPlanner;
   private auditLogger: AuditLogger;
   private eventCallback: EventCallback | null = null;
+  private taskListeners: Map<string, Set<EventCallback>> = new Map();
+  private globalListeners: Set<EventCallback> = new Set();
+  private storagePath: string;
 
   constructor(fileSystem?: SecureFileSystem, toolRegistry?: ToolRegistry, planner?: TaskPlanner) {
     this.auditLogger = AuditLogger.getInstance();
     this.fileSystem = fileSystem || new SecureFileSystem();
     this.toolRegistry = toolRegistry || new ToolRegistry(this.auditLogger);
     this.planner = planner || new TaskPlanner();
+
+    const baseDir = path.join(os.homedir(), ".agent-anjaneya");
+    try {
+      if (!fs.existsSync(baseDir)) {
+        fs.mkdirSync(baseDir, { recursive: true });
+      }
+    } catch {}
+    this.storagePath = path.join(baseDir, "desktop-tasks.json");
+    this.loadPersistedTasks();
 
     // Wire multi-agent activity events to engine callback
     this.planner.getOrchestrator().setActivityCallback((activity) => {
@@ -82,6 +97,40 @@ export class TaskExecutionEngine {
       TaskExecutionEngine.instance = new TaskExecutionEngine();
     }
     return TaskExecutionEngine.instance;
+  }
+
+  /**
+   * Subscribes a listener to events specifically scoped to a single taskId.
+   * Multiple concurrent tasks never overwrite each other, and each task receives only its events.
+   * Returns an unsubscribe cleanup callback.
+   */
+  public subscribeToTask(taskId: string, cb: EventCallback): () => void {
+    let listeners = this.taskListeners.get(taskId);
+    if (!listeners) {
+      listeners = new Set();
+      this.taskListeners.set(taskId, listeners);
+    }
+    listeners.add(cb);
+
+    return () => {
+      const set = this.taskListeners.get(taskId);
+      if (set) {
+        set.delete(cb);
+        if (set.size === 0) {
+          this.taskListeners.delete(taskId);
+        }
+      }
+    };
+  }
+
+  /**
+   * Subscribes a global event listener (e.g. for socket multiplexer or audit stream).
+   */
+  public subscribeGlobal(cb: EventCallback): () => void {
+    this.globalListeners.add(cb);
+    return () => {
+      this.globalListeners.delete(cb);
+    };
   }
 
   public setEventCallback(cb: EventCallback | null): void {
@@ -112,8 +161,16 @@ export class TaskExecutionEngine {
 
   /**
    * Safely transitions task state adhering to protocol state machine.
+   * Strictly enforces that terminal states cannot transition back to active states.
    */
   private transitionTaskStatus(task: EngineTask, newStatus: TaskStatus): boolean {
+    if (task.status === newStatus) return true;
+
+    if (isTerminalTaskStatus(task.status)) {
+      console.warn(`[Engine] Illegal transition rejected: Task ${task.id} is in terminal state '${task.status}' and cannot transition to '${newStatus}'`);
+      return false;
+    }
+
     if (!isValidTaskTransition(task.status, newStatus)) {
       console.warn(`[Engine] Invalid task state transition attempted: ${task.status} -> ${newStatus}`);
       return false;
@@ -121,17 +178,49 @@ export class TaskExecutionEngine {
 
     task.status = newStatus;
     task.updatedAt = new Date().toISOString();
+    this.persistTasks();
     return true;
   }
 
   private emitEvent(type: string, payload: any): void {
+    // 1. Call legacy/default eventCallback if registered
     if (this.eventCallback) {
-      this.eventCallback(type, payload);
+      try {
+        this.eventCallback(type, payload);
+      } catch (e) {
+        console.error("[Engine] Error in global eventCallback:", e);
+      }
+    }
+
+    // 2. Call all registered global listeners
+    for (const listener of this.globalListeners) {
+      try {
+        listener(type, payload);
+      } catch (e) {
+        console.error("[Engine] Error in global listener:", e);
+      }
+    }
+
+    // 3. Call task-scoped listeners registered specifically for this task
+    const taskId = payload?.taskId;
+    if (taskId) {
+      const listeners = this.taskListeners.get(taskId);
+      if (listeners) {
+        for (const listener of listeners) {
+          try {
+            listener(type, payload);
+          } catch (e) {
+            console.error(`[Engine] Error in task-scoped listener for ${taskId}:`, e);
+          }
+        }
+      }
     }
   }
 
   /**
    * Submits a new task instruction from mobile or UI.
+   * Idempotent: repeated delivery of the same taskId will return the existing task
+   * without re-executing it.
    */
   public async submitTask(params: {
     taskId: string;
@@ -141,6 +230,12 @@ export class TaskExecutionEngine {
     mobileSentAt?: string;
     backendReceivedAt?: string;
   }): Promise<EngineTask> {
+    const existing = this.tasks.get(params.taskId);
+    if (existing) {
+      console.warn(`[Engine] Task ${params.taskId} already submitted (status: ${existing.status}). Skipping duplicate submission.`);
+      return existing;
+    }
+
     const desktopReceivedAt = new Date().toISOString();
 
     const task: EngineTask = {
@@ -160,6 +255,7 @@ export class TaskExecutionEngine {
     };
 
     this.tasks.set(task.id, task);
+    this.persistTasks();
 
     // Run planning and execution asynchronously
     this.processTask(task).catch((err) => {
@@ -286,6 +382,7 @@ export class TaskExecutionEngine {
 
     // 5. If this is a read-only find_file or list_directories task, complete it immediately
     if (plan.intent === "FIND_FILE") {
+      this.transitionTaskStatus(task, "RUNNING");
       this.transitionTaskStatus(task, "COMPLETED");
       this.emitEvent("TASK_COMPLETED", {
         taskId: task.id,
@@ -298,13 +395,46 @@ export class TaskExecutionEngine {
     }
 
     if (plan.intent === "LIST_DIRECTORIES") {
-      const dirs = this.fileSystem.listAllowedDirectories();
+      const listContext: ExecutionContext = {
+        taskId: task.id,
+        signal: task.abortController?.signal,
+        fileSystem: this.fileSystem,
+      };
+
+      this.transitionTaskStatus(task, "RUNNING");
+
+      const result = await this.toolRegistry.executeTool(
+        "list_directories",
+        plan.toolInput || {},
+        listContext
+      );
+
+      if (!result.success) {
+        this.transitionTaskStatus(task, "FAILED");
+        task.error = result.error || "Failed to list directories";
+        this.emitEvent("TASK_FAILED", {
+          taskId: task.id,
+          status: "FAILED",
+          error: task.error,
+          code: (result.metadata?.code as string) || "DIRECTORY_LIST_FAILED",
+          timestamp: new Date().toISOString(),
+        } as TaskFailedPayload);
+        return;
+      }
+
       this.transitionTaskStatus(task, "COMPLETED");
+      const data = result.data;
+      const dirList = data?.directories || [];
+      const targetLabel = data?.targetPath || "allowed folders";
+      const summary = dirList.length > 0
+        ? `Directories in ${targetLabel} (${dirList.length}): ${Array.isArray(dirList) ? dirList.map((d: any) => (typeof d === "string" ? d : d.name)).join(", ") : ""}`
+        : `No subdirectories found in ${targetLabel}.`;
+
       this.emitEvent("TASK_COMPLETED", {
         taskId: task.id,
         status: "COMPLETED",
-        metadata: { directories: dirs },
-        summary: `Configured allowed folders: ${dirs.map((d) => d.name).join(", ")}`,
+        metadata: data,
+        summary,
         timestamp: new Date().toISOString(),
       } as TaskCompletedPayload);
       return;
@@ -363,7 +493,8 @@ export class TaskExecutionEngine {
   }
 
   /**
-   * Handles user's approval response from mobile.
+   * Handles user's approval response from mobile or desktop UI.
+   * Strictly enforces that approval is only accepted when status === "WAITING_FOR_APPROVAL".
    */
   public async handleApprovalResponse(params: {
     taskId: string;
@@ -377,7 +508,7 @@ export class TaskExecutionEngine {
     }
 
     if (task.status !== "WAITING_FOR_APPROVAL") {
-      console.warn(`[Engine] Cannot approve task ${task.id} in status ${task.status}`);
+      console.warn(`[Engine] Approval rejected: Task ${task.id} is in status '${task.status}', expected 'WAITING_FOR_APPROVAL'`);
       return false;
     }
 
@@ -395,7 +526,10 @@ export class TaskExecutionEngine {
     }
 
     // Transition: WAITING_FOR_APPROVAL -> APPROVED
-    this.transitionTaskStatus(task, "APPROVED");
+    if (!this.transitionTaskStatus(task, "APPROVED")) {
+      return false;
+    }
+
     await this.executeApprovedPlan(task);
     return true;
   }
@@ -744,5 +878,56 @@ export class TaskExecutionEngine {
     });
 
     return true;
+  }
+
+  /**
+   * Loads persisted tasks from disk on engine startup.
+   * In-flight uncompleted tasks from a prior crashed/stopped process are safely marked as FAILED.
+   */
+  private loadPersistedTasks(): void {
+    try {
+      if (fs.existsSync(this.storagePath)) {
+        const raw = fs.readFileSync(this.storagePath, "utf-8");
+        const parsed: EngineTask[] = JSON.parse(raw);
+        for (const t of parsed) {
+          t.abortController = new AbortController();
+          if (t.status === "PLANNING" || t.status === "RUNNING" || t.status === "VERIFYING" || t.status === "APPROVED") {
+            t.status = "FAILED";
+            t.error = "TASK_INTERRUPTED: Desktop process restarted while task was in progress. Marked as failed for safety.";
+            t.updatedAt = new Date().toISOString();
+          }
+          this.tasks.set(t.id, t);
+        }
+      }
+    } catch (e) {
+      console.warn("[Engine] Failed to load persisted tasks:", e);
+    }
+  }
+
+  /**
+   * Persists task states to disk for crash recovery and restart persistence.
+   */
+  private persistTasks(): void {
+    try {
+      const serializable = Array.from(this.tasks.values()).map(({ abortController, ...rest }) => rest);
+      fs.writeFileSync(this.storagePath, JSON.stringify(serializable, null, 2), "utf-8");
+    } catch (e) {
+      console.warn("[Engine] Failed to persist tasks to disk:", e);
+    }
+  }
+
+  /**
+   * Clears in-memory and persisted tasks (used for clean testing environments).
+   */
+  public clearTasksForTesting(): void {
+    this.tasks.clear();
+    this.taskListeners.clear();
+    this.globalListeners.clear();
+    this.eventCallback = null;
+    try {
+      if (fs.existsSync(this.storagePath)) {
+        fs.unlinkSync(this.storagePath);
+      }
+    } catch {}
   }
 }

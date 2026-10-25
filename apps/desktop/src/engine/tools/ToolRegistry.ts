@@ -4,6 +4,7 @@ import { GetFileMetadataTool } from "./GetFileMetadataTool";
 import { TrimVideoTool } from "./TrimVideoTool";
 import { VerifyOutputTool } from "./VerifyOutputTool";
 import { ListAllowedDirectoriesTool } from "./ListAllowedDirectoriesTool";
+import { ListDirectoriesTool } from "./ListDirectoriesTool";
 import { InspectProjectTool } from "./InspectProjectTool";
 import { ScaffoldProjectTool } from "./ScaffoldProjectTool";
 import { BuildProjectTool } from "./BuildProjectTool";
@@ -32,6 +33,7 @@ export class ToolRegistry {
     this.registerTool(new TrimVideoTool());
     this.registerTool(new VerifyOutputTool());
     this.registerTool(new ListAllowedDirectoriesTool());
+    this.registerTool(new ListDirectoriesTool());
     this.registerTool(new InspectProjectTool());
     this.registerTool(new ScaffoldProjectTool());
     this.registerTool(new BuildProjectTool());

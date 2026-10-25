@@ -62,26 +62,51 @@ export class TaskClassifier {
       });
     }
 
-    // 3. FILE OPERATIONS (e.g. "Find video.mp4 in my Videos folder", "List allowed directories", "Get metadata")
-    if (
-      (lower.includes("list") && (lower.includes("director") || lower.includes("folder") || lower.includes("file"))) ||
+    // 3. FILE OPERATIONS (e.g. "What are the folders present in D drive?", "Find video.mp4 in my Videos folder", "List allowed directories", "Get metadata")
+    const isFolderListingQuery =
+      ((lower.includes("folder") || lower.includes("director")) &&
+        (lower.includes("what") ||
+          lower.includes("list") ||
+          lower.includes("show") ||
+          lower.includes("which") ||
+          lower.includes("present") ||
+          lower.includes("all") ||
+          lower.includes("get") ||
+          lower.includes("display") ||
+          lower.includes("allowed") ||
+          lower.includes("permitted") ||
+          lower.includes("in") ||
+          lower.includes("on") ||
+          lower.includes("drive"))) ||
       lower.includes("allowed folders") ||
-      lower.includes("allowed directories") ||
+      lower.includes("allowed directories");
+
+    const isFileOperation =
+      isFolderListingQuery ||
       lower.startsWith("find") ||
       lower.startsWith("search") ||
       lower.startsWith("where is") ||
       lower.includes("metadata") ||
-      lower.includes("file info")
-    ) {
+      lower.includes("file info");
+
+    if (isFileOperation) {
+      const intent = isFolderListingQuery
+        ? "LIST_DIRECTORIES"
+        : lower.includes("metadata") || lower.includes("file info")
+        ? "GET_METADATA"
+        : "FIND_FILE";
+
+      const tool = isFolderListingQuery
+        ? "list_directories"
+        : intent === "GET_METADATA"
+        ? "get_file_metadata"
+        : "find_file";
+
       return taskClassificationSchema.parse({
         category: "FILE_OPERATION",
-        intent: lower.includes("list") ? "LIST_DIRECTORIES" : lower.includes("metadata") ? "GET_METADATA" : "FIND_FILE",
+        intent,
         requiredCapabilities: ["filesystem_read"],
-        requiredTools: lower.includes("list")
-          ? ["list_allowed_directories"]
-          : lower.includes("metadata")
-          ? ["get_file_metadata"]
-          : ["find_file"],
+        requiredTools: [tool],
         requiresContextGathering: false,
         requiresClarification: false,
         requiresApproval: false,

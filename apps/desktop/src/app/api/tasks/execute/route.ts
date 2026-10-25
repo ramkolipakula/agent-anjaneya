@@ -15,6 +15,8 @@ export async function POST(req: NextRequest) {
 
     const engine = TaskExecutionEngine.getInstance();
 
+    let unsubscribe: (() => void) | null = null;
+
     const stream = new ReadableStream({
       async start(controller) {
         const encoder = new TextEncoder();
@@ -28,19 +30,20 @@ export async function POST(req: NextRequest) {
           }
         };
 
-        // Hook engine event listener
-        const previousCb = (engine as any).eventCallback;
-        engine.setEventCallback((type: string, payload: any) => {
-          if (payload?.taskId === taskId) {
-            sendEvent(type, payload);
+        // Task-scoped subscription: receives only its own events, avoiding concurrent overwrites and memory leaks
+        unsubscribe = engine.subscribeToTask(taskId, (type: string, payload: any) => {
+          sendEvent(type, payload);
 
-            if (payload?.status && isTerminalTaskStatus(payload.status)) {
-              setTimeout(() => {
-                try {
-                  controller.close();
-                } catch (e) {}
-              }, 500);
-            }
+          if (payload?.status && isTerminalTaskStatus(payload.status)) {
+            setTimeout(() => {
+              try {
+                if (unsubscribe) {
+                  unsubscribe();
+                  unsubscribe = null;
+                }
+                controller.close();
+              } catch (e) {}
+            }, 500);
           }
         });
 
@@ -61,7 +64,17 @@ export async function POST(req: NextRequest) {
             error: err.message || "Failed to submit task to engine",
             timestamp: new Date().toISOString(),
           });
+          if (unsubscribe) {
+            unsubscribe();
+            unsubscribe = null;
+          }
           controller.close();
+        }
+      },
+      cancel() {
+        if (unsubscribe) {
+          unsubscribe();
+          unsubscribe = null;
         }
       },
     });

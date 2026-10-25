@@ -1,0 +1,34 @@
+{
+  "name": "backend",
+  "version": "0.1.0",
+  "private": true,
+  "scripts": {
+    "dev": "tsx server.ts",
+    "build": "next build",
+    "start": "NODE_ENV=production tsx server.ts",
+    "lint": "eslint",
+    "prisma": "prisma",
+    "test": "tsx tests/security-pairing.test.ts && tsx tests/task-lifecycle-security.test.ts"
+  },
+  "dependencies": {
+    "@agent-anjaneya/protocol": "*",
+    "@prisma/client": "^6.4.0",
+    "next": "16.3.8",
+    "react": "19.2.8",
+    "react-dom": "19.2.8",
+    "socket.io": "^4.8.4",
+    "socket.io-client": "^4.8.4",
+    "tsx": "^4.23.15"
+  },
+  "devDependencies": {
+    "@tailwindcss/postcss": "^4",
+    "@types/node": "^20",
+    "@types/react": "^19",
+    "@types/react-dom": "^19",
+    "eslint": "^9",
+    "eslint-config-next": "16.3.8",
+    "prisma": "^6.4.0",
+    "tailwindcss": "^4",
+    "typescript": "^5"
+  }
+}

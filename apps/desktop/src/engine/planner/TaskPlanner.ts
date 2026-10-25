@@ -274,21 +274,69 @@ export class TaskPlanner {
     }
 
     // ----------------------------------------------------
-    // Pattern 2: List Allowed Directories
-    // Examples: "List allowed directories", "List folders", "What folders are permitted"
+    // Pattern 2: List Directories / Folder Queries
+    // Examples:
+    // - "What are the folders present in D drive?"
+    // - "List all folders in my D drive."
+    // - "What directories are present in D drive?"
+    // - "What folders are in D:?"
+    // - "List all directories in D drive."
+    // - "List allowed directories"
+    // - "List folders"
     // ----------------------------------------------------
-    if (
-      lower.includes("list") &&
-      (lower.includes("directories") || lower.includes("directory") || lower.includes("folders") || lower.includes("folder"))
-    ) {
+    const isFolderListing =
+      ((lower.includes("folder") || lower.includes("director")) &&
+        (lower.includes("what") ||
+          lower.includes("list") ||
+          lower.includes("show") ||
+          lower.includes("which") ||
+          lower.includes("present") ||
+          lower.includes("all") ||
+          lower.includes("get") ||
+          lower.includes("display") ||
+          lower.includes("allowed") ||
+          lower.includes("permitted") ||
+          lower.includes("in") ||
+          lower.includes("on") ||
+          lower.includes("drive"))) ||
+      lower.includes("allowed folders") ||
+      lower.includes("allowed directories");
+
+    if (isFolderListing) {
+      let targetDirectory: string | undefined;
+
+      // Extract drive letter (e.g. "D drive", "D:\", "D:")
+      const driveMatch = text.match(/(?:in|under|on|of|from|present in)?\s*([a-zA-Z])\s*drive/i);
+      if (driveMatch) {
+        targetDirectory = `${driveMatch[1].toUpperCase()}:\\`;
+      } else {
+        const directPathMatch = text.match(/([a-zA-Z]:[\\\/]?[a-zA-Z0-9_\-\\\/]*)/i);
+        if (directPathMatch) {
+          targetDirectory = directPathMatch[1];
+          if (/^[a-zA-Z]:$/i.test(targetDirectory)) {
+            targetDirectory = `${targetDirectory}\\`;
+          }
+        } else {
+          const namedFolderMatch = text.match(/(?:in|under|on|of|from)\s+(?:my\s+|the\s+)?([a-zA-Z0-9_\-]+)(?:\s+folder|\s+directory)?/i);
+          if (namedFolderMatch && !namedFolderMatch[1].includes(".") && !["my", "the", "a", "all"].includes(namedFolderMatch[1].toLowerCase())) {
+            targetDirectory = namedFolderMatch[1];
+          }
+        }
+      }
+
+      const title = targetDirectory
+        ? `List directories in ${targetDirectory}`
+        : "List Allowed Directories";
+
       return {
         taskId,
         intent: "LIST_DIRECTORIES",
-        title: "List Allowed Directories",
-        operation: { type: "LIST" },
+        title,
+        targetDirectory,
+        operation: { type: "LIST_DIRECTORIES", targetDirectory },
         requiresApproval: false,
-        toolName: "list_allowed_directories",
-        toolInput: {},
+        toolName: "list_directories",
+        toolInput: { directoryPath: targetDirectory },
       };
     }
 

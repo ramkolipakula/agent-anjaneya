@@ -25,7 +25,11 @@ export class RuleBasedIntelligenceProvider implements AIModelProvider {
 
     // 1. Task Analyst Prompt handling
     if (lower.includes("role: task_analyst") || lower.includes("agent 1 — task analyst")) {
-      const isPortfolio = lower.includes("portfolio") || lower.includes("website");
+      const isPortfolio =
+        (lower.includes("portfolio") || lower.includes("website") || lower.includes("showcase")) &&
+        !lower.includes("drive") &&
+        !lower.includes("folder") &&
+        !lower.includes("director");
       outputObj = {
         role: "TASK_ANALYST",
         taskId: "task-auto",
@@ -233,12 +237,43 @@ export class RuleBasedIntelligenceProvider implements AIModelProvider {
           status: "REJECTED",
         };
       } else {
-        outputObj = {
-          proposalId: "proposal-portfolio-" + Math.random().toString(36).substring(7),
-          taskId: "task-auto",
-          userObjective: "Build and deploy a portfolio website using existing projects",
-          relevantContextSummary: "Found existing project repositories in allowed folders.",
-          proposedApproach: "1. Inspect repositories -> 2. Scaffold portfolio UI -> 3. Build & package -> 4. Verify output",
+        const isPortfolio =
+          lower.includes("portfolio") || lower.includes("website") || lower.includes("portfolio-showcase");
+
+        if (!isPortfolio) {
+          outputObj = {
+            proposalId: "proposal-general-" + Math.random().toString(36).substring(7),
+            taskId: "task-auto",
+            userObjective: "Inspect requested filesystem directories safely",
+            relevantContextSummary: "Permitted files and directories inspected.",
+            proposedApproach: "List directories in permitted locations.",
+            steps: [
+              {
+                stepId: "1",
+                tool: "list_directories",
+                description: "List directories in permitted location",
+                dependencies: [],
+                risk: "LOW",
+                requiresApproval: false,
+                input: {},
+              },
+            ],
+            requiredTools: ["list_directories"],
+            expectedOutputs: ["directory_listing"],
+            risks: [],
+            permissionsRequired: ["Filesystem Read"],
+            requiresApproval: false,
+            estimatedComplexity: "LOW",
+            conciseSummary: "List directories in permitted storage locations.",
+            status: "PROPOSED",
+          };
+        } else {
+          outputObj = {
+            proposalId: "proposal-portfolio-" + Math.random().toString(36).substring(7),
+            taskId: "task-auto",
+            userObjective: "Build and deploy a portfolio website using existing projects",
+            relevantContextSummary: "Found existing project repositories in allowed folders.",
+            proposedApproach: "1. Inspect repositories -> 2. Scaffold portfolio UI -> 3. Build & package -> 4. Verify output",
           steps: [
             {
               stepId: "1",
@@ -288,7 +323,8 @@ export class RuleBasedIntelligenceProvider implements AIModelProvider {
           status: "PROPOSED",
         };
       }
-    } else {
+    }
+  } else {
       // Default fallback
       outputObj = {
         error: "Unrecognized agent prompt",

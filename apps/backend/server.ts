@@ -8,6 +8,8 @@ import {
   RealtimeMessage,
   validateRealtimeMessage,
   ALLOWED_MESSAGE_TYPES,
+  isValidTaskTransition,
+  TaskStatus,
 } from "@agent-anjaneya/protocol";
 
 const dev = process.env.NODE_ENV !== "production";
@@ -227,27 +229,35 @@ app.prepare().then(() => {
         }
       }
 
-      // 6. Task creation persistence
+      // 6. Task creation persistence (Idempotent)
       if (msg.type === "TASK_CREATED") {
         try {
-          const task = await prisma.task.create({
-            data: {
-              userId,
-              desktopDeviceId: msg.targetDeviceId,
-              createdByDeviceId: deviceId,
-              inputText: msg.payload?.text || "",
-              status: "RECEIVED",
-            },
-          });
+          const clientTaskId = msg.payload?.taskId || undefined;
+          let task = clientTaskId
+            ? await prisma.task.findUnique({ where: { id: clientTaskId } })
+            : null;
 
-          await prisma.taskEvent.create({
-            data: {
-              taskId: task.id,
-              eventType: "TASK_CREATED",
-              sourceDeviceId: deviceId,
-              payload: JSON.stringify(msg.payload || {}),
-            },
-          });
+          if (!task) {
+            task = await prisma.task.create({
+              data: {
+                ...(clientTaskId ? { id: clientTaskId } : {}),
+                userId,
+                desktopDeviceId: msg.targetDeviceId,
+                createdByDeviceId: deviceId,
+                inputText: msg.payload?.text || "",
+                status: "RECEIVED",
+              },
+            });
+
+            await prisma.taskEvent.create({
+              data: {
+                taskId: task.id,
+                eventType: "TASK_CREATED",
+                sourceDeviceId: deviceId,
+                payload: JSON.stringify(msg.payload || {}),
+              },
+            });
+          }
 
           msg.payload = { ...msg.payload, taskId: task.id };
         } catch (e) {
@@ -270,10 +280,17 @@ app.prepare().then(() => {
           else if (msg.type === "TASK_CANCEL" || msg.type === "TASK_CANCELLED") newStatus = "CANCELLED";
 
           if (newStatus) {
-            await prisma.task.update({
-              where: { id: taskId },
-              data: { status: newStatus },
-            });
+            const currentTask = await prisma.task.findUnique({ where: { id: taskId } });
+            if (currentTask) {
+              if (isValidTaskTransition(currentTask.status as TaskStatus, newStatus as TaskStatus)) {
+                await prisma.task.update({
+                  where: { id: taskId },
+                  data: { status: newStatus },
+                });
+              } else {
+                console.warn(`[Socket] Rejected invalid DB transition for task ${taskId}: ${currentTask.status} -> ${newStatus}`);
+              }
+            }
           }
 
           await prisma.taskEvent.create({
