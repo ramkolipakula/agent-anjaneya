@@ -57,6 +57,24 @@ export class TaskExecutionEngine {
     this.fileSystem = fileSystem || new SecureFileSystem();
     this.toolRegistry = toolRegistry || new ToolRegistry(this.auditLogger);
     this.planner = planner || new TaskPlanner();
+
+    // Wire multi-agent activity events to engine callback
+    this.planner.getOrchestrator().setActivityCallback((activity) => {
+      this.emitEvent("AGENT_ACTIVITY", activity);
+      this.emitEvent("TASK_PROGRESS", {
+        taskId: activity.taskId,
+        status: "PLANNING",
+        step: activity.stage,
+        message: activity.summary,
+        metadata: {
+          agentRole: activity.agentRole,
+          evidence: activity.evidence,
+          debateRound: activity.debateRound,
+          metrics: activity.metrics,
+        },
+        timestamp: activity.timestamp,
+      } as TaskProgressPayload);
+    });
   }
 
   public static getInstance(): TaskExecutionEngine {
@@ -167,7 +185,11 @@ export class TaskExecutionEngine {
     // 2. Generate structured TaskPlan
     let plan: TaskPlan;
     try {
-      plan = await this.planner.plan(task.inputText, task.id);
+      plan = await this.planner.plan(task.inputText, task.id, {
+        fileSystem: this.fileSystem,
+        toolRegistry: this.toolRegistry,
+        signal: task.abortController?.signal,
+      });
       task.plan = plan;
       task.timestamps.planningFinishedAt = new Date().toISOString();
     } catch (err: any) {
@@ -290,11 +312,12 @@ export class TaskExecutionEngine {
 
     // 6. User Approval Workflow
     if (plan.requiresApproval) {
+      const preparingMsg = plan.proposal ? "Proposal ready. Waiting for approval." : "Preparing video processing...";
       this.emitEvent("TASK_PROGRESS", {
         taskId: task.id,
         status: "PLANNING",
         step: "PREPARING",
-        message: "Preparing video processing...",
+        message: preparingMsg,
         timestamp: new Date().toISOString(),
       } as TaskProgressPayload);
 
@@ -309,6 +332,14 @@ export class TaskExecutionEngine {
         timestamp: new Date().toISOString(),
       } as TaskProgressPayload);
 
+      if (plan.proposal) {
+        this.emitEvent("TASK_PROPOSAL_READY", {
+          taskId: task.id,
+          proposal: plan.proposal,
+          timestamp: new Date().toISOString(),
+        });
+      }
+
       // Emit formal TASK_APPROVAL_REQUEST to mobile
       this.emitEvent("TASK_APPROVAL_REQUEST", {
         taskId: task.id,
@@ -317,8 +348,9 @@ export class TaskExecutionEngine {
         operation: plan.operation,
         sourceFile: plan.sourceFile,
         outputFile: plan.outputFile,
+        proposal: plan.proposal,
         requiresApproval: true,
-        details: `Extract first ${plan.operation.durationSeconds || 10} seconds to ${plan.outputFile || "output.mp4"}`,
+        details: plan.proposal?.conciseSummary || `Extract first ${plan.operation.durationSeconds || 10} seconds to ${plan.outputFile || "output.mp4"}`,
         timestamp: new Date().toISOString(),
       } as TaskApprovalRequestPayload);
 
@@ -378,11 +410,16 @@ export class TaskExecutionEngine {
     if (!this.transitionTaskStatus(task, "RUNNING")) return;
     task.timestamps.executionStartedAt = new Date().toISOString();
 
+    const runningMessage =
+      task.plan.operation?.type === "MULTI_AGENT_EXECUTION"
+        ? `Executing plan: ${task.plan.title}...`
+        : "Processing video...";
+
     this.emitEvent("TASK_PROGRESS", {
       taskId: task.id,
       status: "RUNNING",
       step: "RUNNING",
-      message: "Processing video...",
+      message: runningMessage,
       timestamp: new Date().toISOString(),
     } as TaskProgressPayload);
 
@@ -402,7 +439,139 @@ export class TaskExecutionEngine {
       },
     };
 
-    // Execute tool through ToolRegistry
+    // Branch A: Multi-Step Execution (from Multi-Agent Planning)
+    if (task.plan.operation?.type === "MULTI_AGENT_EXECUTION" && task.plan.proposal?.steps) {
+      const steps = task.plan.proposal.steps;
+      let lastOutputPath: string | undefined;
+      let accumulatedData: Record<string, any> = {};
+
+      for (let i = 0; i < steps.length; i++) {
+        const step = steps[i];
+        if (task.abortController?.signal.aborted) {
+          this.transitionTaskStatus(task, "CANCELLED");
+          this.emitEvent("TASK_CANCELLED", {
+            taskId: task.id,
+            reason: "Task was cancelled by user",
+            timestamp: new Date().toISOString(),
+          });
+          return;
+        }
+
+        const pct = Math.round(((i + 1) / steps.length) * 100);
+        this.emitEvent("TASK_PROGRESS", {
+          taskId: task.id,
+          status: "RUNNING",
+          step: `STEP_${step.stepId}`,
+          message: step.description,
+          progressPercent: pct,
+          timestamp: new Date().toISOString(),
+        } as TaskProgressPayload);
+
+        const stepInput = { ...(step.input || {}) };
+        if (step.tool === "verify_output" && !stepInput.filePath && lastOutputPath) {
+          stepInput.filePath = lastOutputPath;
+        }
+
+        const stepResult = await this.toolRegistry.executeTool(
+          step.tool,
+          stepInput,
+          context
+        );
+
+        if (!stepResult.success) {
+          this.transitionTaskStatus(task, "FAILED");
+          task.error = `Step '${step.description}' failed: ${stepResult.error}`;
+          this.emitEvent("TASK_FAILED", {
+            taskId: task.id,
+            status: "FAILED",
+            error: task.error,
+            code: (stepResult.metadata?.code as string) || "STEP_FAILED",
+            step: step.stepId,
+            timestamp: new Date().toISOString(),
+          } as TaskFailedPayload);
+          return;
+        }
+
+        if (stepResult.data?.outputPath) {
+          lastOutputPath = stepResult.data.outputPath;
+        }
+        accumulatedData = { ...accumulatedData, ...stepResult.data };
+      }
+
+      task.timestamps.executionCompletedAt = new Date().toISOString();
+
+      // Output Verification Step
+      this.transitionTaskStatus(task, "VERIFYING");
+      this.emitEvent("TASK_PROGRESS", {
+        taskId: task.id,
+        status: "VERIFYING",
+        step: "VERIFYING",
+        message: "Verifying multi-agent output bundle...",
+        timestamp: new Date().toISOString(),
+      } as TaskProgressPayload);
+
+      const verifyContext: ExecutionContext = {
+        taskId: task.id,
+        signal: task.abortController?.signal,
+        fileSystem: this.fileSystem,
+      };
+
+      if (lastOutputPath) {
+        const verifyResult = await this.toolRegistry.executeTool(
+          "verify_output",
+          {
+            filePath: lastOutputPath,
+            expectedMinSize: task.plan.verification?.expectedMinSize || 100,
+          },
+          verifyContext
+        );
+
+        if (!verifyResult.success) {
+          this.transitionTaskStatus(task, "FAILED");
+          task.error = `Verification error: ${verifyResult.error}`;
+          this.emitEvent("TASK_FAILED", {
+            taskId: task.id,
+            status: "FAILED",
+            error: task.error,
+            code: "VERIFICATION_FAILED",
+            timestamp: new Date().toISOString(),
+          } as TaskFailedPayload);
+          return;
+        }
+      }
+
+      task.timestamps.verificationCompletedAt = new Date().toISOString();
+      this.transitionTaskStatus(task, "COMPLETED");
+      task.result = {
+        ...accumulatedData,
+        outputPath: lastOutputPath,
+      };
+
+      const tExec = task.timestamps.executionStartedAt && task.timestamps.executionCompletedAt
+        ? new Date(task.timestamps.executionCompletedAt).getTime() - new Date(task.timestamps.executionStartedAt).getTime()
+        : 10;
+
+      this.emitEvent("TASK_PROGRESS", {
+        taskId: task.id,
+        status: "COMPLETED",
+        step: "COMPLETED",
+        message: "Completed all planned steps.",
+        timestamp: new Date().toISOString(),
+      } as TaskProgressPayload);
+
+      this.emitEvent("TASK_COMPLETED", {
+        taskId: task.id,
+        status: "COMPLETED",
+        outputPath: lastOutputPath,
+        summary: `Completed successfully: ${task.plan.title}`,
+        metadata: accumulatedData,
+        executionTimeMs: tExec,
+        timestamp: new Date().toISOString(),
+      } as TaskCompletedPayload);
+      return;
+    }
+
+    // Branch B: Single-Step Tool Execution (Phase 2 Deterministic)
     const toolResult = await this.toolRegistry.executeTool(
       task.plan.toolName,
       task.plan.toolInput,

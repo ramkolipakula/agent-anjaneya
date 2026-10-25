@@ -49,8 +49,6 @@ const FORBIDDEN_FILE_PATTERNS: RegExp[] = [
   /credentials\.json$/i,
   /service-account.*\.json$/i,
   /dev\.db(\-journal)?$/i,
-  /package\.json$/i,
-  /tsconfig\.json$/i,
 ];
 
 export class SecureFileSystem {
@@ -89,6 +87,11 @@ export class SecureFileSystem {
 
   public listAllowedDirectories(): AllowedDirectory[] {
     return Array.from(this.allowedDirectories.values());
+  }
+
+  public getDefaultAllowedDirectory(): AllowedDirectory | undefined {
+    const list = this.listAllowedDirectories();
+    return list.find((d) => d.isDefault) || list[0];
   }
 
   public getAllowedDirectoryById(id: string): AllowedDirectory | undefined {
@@ -211,10 +214,17 @@ export class SecureFileSystem {
 
     // 7. Prevent symlink escapes
     try {
+      let matchedCanonical = matchedDir.path;
+      try {
+        if (fs.existsSync(matchedDir.path)) {
+          matchedCanonical = fs.realpathSync(matchedDir.path);
+        }
+      } catch (e) {}
+      const dirLower = matchedCanonical.toLowerCase();
+
       if (fs.existsSync(normalizedPath)) {
         const real = fs.realpathSync(normalizedPath);
         const realLower = real.toLowerCase();
-        const dirLower = matchedDir.path.toLowerCase();
         if (realLower !== dirLower && !realLower.startsWith(dirLower + path.sep)) {
           return {
             allowed: false,
@@ -229,7 +239,6 @@ export class SecureFileSystem {
           if (fs.existsSync(parentDir)) {
             const realParent = fs.realpathSync(parentDir);
             const realParentLower = realParent.toLowerCase();
-            const dirLower = matchedDir.path.toLowerCase();
             if (realParentLower !== dirLower && !realParentLower.startsWith(dirLower + path.sep)) {
               return {
                 allowed: false,

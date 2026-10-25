@@ -1,9 +1,20 @@
 import { z } from "zod";
-import { TaskPlan } from "@agent-anjaneya/protocol";
+import { TaskPlan, finalProposalSchema } from "@agent-anjaneya/protocol";
+import { MultiAgentOrchestrator } from "../orchestrator/MultiAgentOrchestrator";
+import { SecureFileSystem } from "../filesystem/SecureFileSystem";
+import { ToolRegistry } from "../tools/ToolRegistry";
 
 export const taskPlanSchema = z.object({
   taskId: z.string(),
-  intent: z.enum(["VIDEO_TRIM", "FIND_FILE", "GET_METADATA", "LIST_DIRECTORIES", "UNSUPPORTED"]),
+  intent: z.enum([
+    "VIDEO_TRIM",
+    "FIND_FILE",
+    "GET_METADATA",
+    "LIST_DIRECTORIES",
+    "SOFTWARE_DEVELOPMENT",
+    "MULTI_AGENT_PROPOSAL",
+    "UNSUPPORTED",
+  ]),
   title: z.string(),
   sourceFile: z.string().optional(),
   targetDirectory: z.string().optional(),
@@ -14,6 +25,7 @@ export const taskPlanSchema = z.object({
   requiresApproval: z.boolean(),
   toolName: z.string(),
   toolInput: z.record(z.string(), z.any()),
+  proposal: finalProposalSchema.optional(),
   verification: z.object({
     expectedDuration: z.number().optional(),
     expectedMinSize: z.number().optional(),
@@ -28,31 +40,128 @@ export interface LLMProvider {
 
 export class TaskPlanner {
   private llmProvider: LLMProvider | null = null;
+  private orchestrator: MultiAgentOrchestrator;
 
-  constructor(llmProvider?: LLMProvider) {
+  constructor(llmProvider?: LLMProvider, orchestrator?: MultiAgentOrchestrator) {
     if (llmProvider) {
       this.llmProvider = llmProvider;
     }
+    this.orchestrator = orchestrator || new MultiAgentOrchestrator();
   }
 
   public setLLMProvider(provider: LLMProvider | null): void {
     this.llmProvider = provider;
   }
 
+  public getOrchestrator(): MultiAgentOrchestrator {
+    return this.orchestrator;
+  }
+
+  public setOrchestrator(orch: MultiAgentOrchestrator): void {
+    this.orchestrator = orch;
+  }
+
   /**
    * Plans a natural language instruction into a structured, validated TaskPlan.
-   * Simple and well-defined commands are deterministically parsed with zero latency.
+   * Simple commands are deterministically parsed with zero latency.
+   * Complex instructions trigger multi-agent analysis, context gathering, and bounded debate.
    */
-  public async plan(prompt: string, taskId: string): Promise<TaskPlan> {
+  public async plan(
+    prompt: string,
+    taskId: string,
+    context?: {
+      fileSystem?: SecureFileSystem;
+      toolRegistry?: ToolRegistry;
+      signal?: AbortSignal;
+    }
+  ): Promise<TaskPlan> {
     const trimmed = prompt.trim();
+    const lower = trimmed.toLowerCase();
 
-    // 1. First try deterministic pattern matching
+    // 1. Guardrail against broad destructive operations (e.g. "Delete everything from my Documents folder")
+    const isBroadDestructive =
+      (lower.includes("delete") || lower.includes("remove") || lower.includes("wipe") || lower.includes("erase")) &&
+      (lower.includes("everything") || lower.includes("all") || lower.includes("*") || lower.includes("entire"));
+
+    if (isBroadDestructive) {
+      return taskPlanSchema.parse({
+        taskId,
+        intent: "UNSUPPORTED",
+        title: "Unsafe Destructive Operation Blocked",
+        operation: {
+          type: "BLOCKED_UNSAFE",
+          reason: "Broad destructive deletion of user files is strictly prohibited by security policy.",
+        },
+        requiresApproval: false,
+        toolName: "unsupported",
+        toolInput: { rawInput: trimmed },
+      });
+    }
+
+    // 2. First try deterministic pattern matching (zero latency for Phase 2 commands)
     const deterministicPlan = this.parseDeterministic(trimmed, taskId);
     if (deterministicPlan) {
       return taskPlanSchema.parse(deterministicPlan);
     }
 
-    // 2. If deterministic parsing didn't match and an LLM provider is present, try LLM
+    // 3. Multi-Agent Orchestrator for complex tasks (e.g. "Build a portfolio website...")
+    if (context?.fileSystem && context?.toolRegistry) {
+      try {
+        const orchResult = await this.orchestrator.plan({
+          taskId,
+          inputText: trimmed,
+          fileSystem: context.fileSystem,
+          toolRegistry: context.toolRegistry,
+          signal: context.signal,
+        });
+
+        if (orchResult.isDeterministicBypass) {
+          const parsed = this.parseDeterministic(trimmed, taskId);
+          if (parsed) return taskPlanSchema.parse(parsed);
+        }
+
+        if (orchResult.proposal) {
+          const prop = orchResult.proposal;
+
+          if (prop.status === "REJECTED") {
+            return taskPlanSchema.parse({
+              taskId,
+              intent: "UNSUPPORTED",
+              title: "Plan Rejected for Safety",
+              operation: { type: "REJECTED_UNSAFE", reason: prop.conciseSummary },
+              requiresApproval: false,
+              toolName: "unsupported",
+              toolInput: { rawInput: trimmed },
+              proposal: prop,
+            });
+          }
+
+          const primaryStep = prop.steps[0];
+          return taskPlanSchema.parse({
+            taskId,
+            intent: "SOFTWARE_DEVELOPMENT",
+            title: prop.userObjective,
+            proposal: prop,
+            requiresApproval: prop.requiresApproval,
+            toolName: primaryStep ? primaryStep.tool : "inspect_project",
+            toolInput: primaryStep && primaryStep.input ? primaryStep.input : {},
+            operation: {
+              type: "MULTI_AGENT_EXECUTION",
+              summary: prop.conciseSummary,
+              steps: prop.steps,
+              expectedOutputs: prop.expectedOutputs,
+            },
+            verification: {
+              expectedMinSize: 500,
+            },
+          });
+        }
+      } catch (err: any) {
+        console.warn("[TaskPlanner] Multi-agent orchestration error, checking fallbacks:", err.message);
+      }
+    }
+
+    // 4. If legacy LLM provider is present, try LLM fallback
     if (this.llmProvider) {
       try {
         const llmPlan = await this.llmProvider.generatePlan(trimmed, taskId);
@@ -64,7 +173,7 @@ export class TaskPlanner {
       }
     }
 
-    // 3. Fallback: Unsupported operation
+    // 5. Fallback: Unsupported operation
     return taskPlanSchema.parse({
       taskId,
       intent: "UNSUPPORTED",

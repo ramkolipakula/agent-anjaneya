@@ -6,7 +6,7 @@
     "dev": "next dev -p 3001",
     "build": "next build",
     "lint": "eslint",
-    "test": "tsx tests/engine-security.test.ts && tsx tests/e2e-task-execution.test.ts"
+    "test": "tsx tests/engine-security.test.ts && tsx tests/e2e-task-execution.test.ts && tsx tests/multi-agent-planning.test.ts && tsx tests/e2e-multi-agent.test.ts"
   },
   "dependencies": {
     "@agent-anjaneya/protocol": "*",

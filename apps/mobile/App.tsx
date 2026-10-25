@@ -11,7 +11,13 @@ import {
 } from 'react-native';
 import { CameraView, useCameraPermissions } from 'expo-camera';
 import { io, Socket } from 'socket.io-client';
-import { DeviceStatus, RealtimeMessage } from '@agent-anjaneya/protocol';
+import {
+  DeviceStatus,
+  RealtimeMessage,
+  AgentActivityPayload,
+  AgentActivityStage,
+  FinalProposal,
+} from '@agent-anjaneya/protocol';
 
 const DEFAULT_BACKEND_URL = Platform.OS === 'web' ? 'http://localhost:3000' : 'http://10.0.2.2:3000';
 
@@ -48,6 +54,7 @@ interface ApprovalRequest {
   sourceFile?: string;
   outputFile?: string;
   details?: string;
+  proposal?: FinalProposal;
 }
 
 export default function App() {
@@ -85,6 +92,9 @@ export default function App() {
   const [isTaskRunning, setIsTaskRunning] = useState(false);
   const [activeApproval, setActiveApproval] = useState<ApprovalRequest | null>(null);
   const [activeTaskId, setActiveTaskId] = useState<string | null>(null);
+  const [currentStage, setCurrentStage] = useState<AgentActivityStage | null>(null);
+  const [agentActivities, setAgentActivities] = useState<AgentActivityPayload[]>([]);
+  const [activeProposal, setActiveProposal] = useState<FinalProposal | null>(null);
 
   const sentTimeRef = useRef<number | null>(null);
   const deviceIdRef = useRef<string>(deviceId);
@@ -293,9 +303,32 @@ export default function App() {
     newSocket.on('message', (msg: RealtimeMessage) => {
       console.log('[Socket] Mobile received message:', msg);
 
+      // 0. Agent Activity Events (Phase 3 Multi-Agent Visibility)
+      if (msg.type === 'AGENT_ACTIVITY') {
+        const activity = msg.payload as AgentActivityPayload;
+        if (activity) {
+          setCurrentStage(activity.stage);
+          setAgentActivities((prev) => [activity, ...prev.slice(0, 15)]);
+          const prefix = activity.agentRole ? `[${activity.agentRole}] ` : '';
+          addMessage(`${prefix}${activity.summary}`, 'agent', { step: activity.stage });
+        }
+      }
+
+      // 0.1 Proposal Ready Event
+      if (msg.type === 'TASK_PROPOSAL_READY') {
+        if (msg.payload?.proposal) {
+          setActiveProposal(msg.payload.proposal);
+          setCurrentStage('PROPOSAL_READY');
+        }
+      }
+
       // 1. Task Progress Events
       if (msg.type === 'TASK_PROGRESS') {
         const message = msg.payload?.message;
+        const step = msg.payload?.step;
+        if (step && typeof step === 'string') {
+          setCurrentStage(step as AgentActivityStage);
+        }
         if (message) {
           addMessage(`"${message}"`, 'agent', { step: msg.payload?.step });
         }
@@ -304,6 +337,10 @@ export default function App() {
       // 2. Task Approval Request
       if (msg.type === 'TASK_APPROVAL_REQUEST') {
         setActiveApproval(msg.payload);
+        if (msg.payload?.proposal) {
+          setActiveProposal(msg.payload.proposal);
+        }
+        setCurrentStage('WAITING_FOR_APPROVAL');
         addMessage(`Approval requested for: ${msg.payload?.title || 'Task'}`, 'system');
       }
 
@@ -323,24 +360,30 @@ export default function App() {
           isSuccess: true,
         });
 
+        setCurrentStage('COMPLETED');
         setIsTaskRunning(false);
         setActiveApproval(null);
+        setActiveProposal(null);
       }
 
       // 4. Task Failed Event
       if (msg.type === 'TASK_FAILED') {
         const err = msg.payload?.error || 'Task execution failed.';
         addMessage(`Error: ${err}`, 'agent', { isError: true });
+        setCurrentStage('FAILED');
         setIsTaskRunning(false);
         setActiveApproval(null);
+        setActiveProposal(null);
       }
 
       // 5. Task Cancelled Event
       if (msg.type === 'TASK_CANCELLED') {
         const reason = msg.payload?.reason || 'Task was cancelled.';
         addMessage(`Notice: ${reason}`, 'system');
+        setCurrentStage('CANCELLED');
         setIsTaskRunning(false);
         setActiveApproval(null);
+        setActiveProposal(null);
       }
 
       // 6. Device status sync
@@ -618,6 +661,13 @@ export default function App() {
         <ScrollView horizontal showsHorizontalScrollIndicator={false} contentContainerStyle={{ gap: 8 }}>
           <TouchableOpacity
             style={styles.chip}
+            onPress={() => handleSendCommand('Build a portfolio website using my existing projects. Make it look professional, deploy it, and send me the link.')}
+            disabled={isTaskRunning || desktopStatus !== 'ONLINE'}
+          >
+            <Text style={styles.chipText}>🌐 Build portfolio from projects</Text>
+          </TouchableOpacity>
+          <TouchableOpacity
+            style={styles.chip}
             onPress={() => handleSendCommand('Find video.mp4 in my Videos folder and extract the first 10 seconds')}
             disabled={isTaskRunning || desktopStatus !== 'ONLINE'}
           >
@@ -630,15 +680,18 @@ export default function App() {
           >
             <Text style={styles.chipText}>📁 List allowed folders</Text>
           </TouchableOpacity>
-          <TouchableOpacity
-            style={styles.chip}
-            onPress={() => handleSendCommand('Find document.pdf in Documents')}
-            disabled={isTaskRunning || desktopStatus !== 'ONLINE'}
-          >
-            <Text style={styles.chipText}>📄 Find document.pdf</Text>
-          </TouchableOpacity>
         </ScrollView>
       </View>
+
+      {/* Stage Status Pipeline */}
+      {currentStage && (
+        <View style={styles.stageBar}>
+          <View style={styles.stageIndicator}>
+            <ActivityIndicator size="small" color="#58a6ff" />
+            <Text style={styles.stageTitle}>STAGE: {currentStage}</Text>
+          </View>
+        </View>
+      )}
 
       {/* Chat / Timeline Area */}
       <ScrollView style={styles.chatArea} contentContainerStyle={{ padding: 16 }}>
@@ -681,18 +734,67 @@ export default function App() {
           </View>
         ))}
 
-        {/* Interactive Approval Card */}
+        {/* Interactive Multi-Agent Proposal Card */}
         {activeApproval && (
           <View style={styles.approvalCard}>
             <View style={styles.approvalHeader}>
-              <Text style={styles.approvalTitle}>⚠️ Task Approval Requested</Text>
+              <Text style={styles.approvalTitle}>
+                {activeApproval.proposal ? '🤖 Multi-Agent Execution Proposal' : '⚠️ Task Approval Requested'}
+              </Text>
             </View>
-            <Text style={styles.approvalTaskName}>{activeApproval.title}</Text>
-            {activeApproval.details && (
-              <Text style={styles.approvalDetails}>{activeApproval.details}</Text>
-            )}
-            {activeApproval.outputFile && (
-              <Text style={styles.approvalOutput}>Target Output: {activeApproval.outputFile}</Text>
+
+            {activeApproval.proposal ? (
+              <View style={styles.proposalBody}>
+                <View style={styles.proposalObjectiveRow}>
+                  <Text style={styles.proposalObjectiveLabel}>OBJECTIVE:</Text>
+                  <Text style={styles.proposalObjectiveText}>{activeApproval.proposal.userObjective}</Text>
+                </View>
+
+                <View style={styles.proposalBadgeRow}>
+                  <View style={styles.complexityBadge}>
+                    <Text style={styles.complexityBadgeText}>Complexity: {activeApproval.proposal.estimatedComplexity}</Text>
+                  </View>
+                  <View style={styles.toolsBadge}>
+                    <Text style={styles.toolsBadgeText}>Tools: {activeApproval.proposal.requiredTools.join(', ')}</Text>
+                  </View>
+                </View>
+
+                {activeApproval.proposal.relevantContextSummary ? (
+                  <View style={styles.proposalSection}>
+                    <Text style={styles.proposalSectionLabel}>CONTEXT:</Text>
+                    <Text style={styles.proposalSectionText}>{activeApproval.proposal.relevantContextSummary}</Text>
+                  </View>
+                ) : null}
+
+                <View style={styles.proposalSection}>
+                  <Text style={styles.proposalSectionLabel}>EXECUTION PLAN:</Text>
+                  {activeApproval.proposal.steps.map((st, idx) => (
+                    <View key={st.stepId} style={styles.stepItemRow}>
+                      <Text style={styles.stepNumberBadge}>{idx + 1}</Text>
+                      <View style={{ flex: 1 }}>
+                        <Text style={styles.stepDescriptionText}>{st.description}</Text>
+                        <Text style={styles.stepToolText}>tool: {st.tool} • risk: {st.risk}</Text>
+                      </View>
+                    </View>
+                  ))}
+                </View>
+
+                {activeApproval.proposal.risks.length > 0 && (
+                  <View style={styles.riskAlertBox}>
+                    <Text style={styles.riskAlertText}>Risks: {activeApproval.proposal.risks.join(' • ')}</Text>
+                  </View>
+                )}
+              </View>
+            ) : (
+              <View>
+                <Text style={styles.approvalTaskName}>{activeApproval.title}</Text>
+                {activeApproval.details && (
+                  <Text style={styles.approvalDetails}>{activeApproval.details}</Text>
+                )}
+                {activeApproval.outputFile && (
+                  <Text style={styles.approvalOutput}>Target Output: {activeApproval.outputFile}</Text>
+                )}
+              </View>
             )}
 
             <View style={styles.approvalActions}>
@@ -1156,8 +1258,130 @@ const styles = StyleSheet.create({
     fontSize: 14,
     fontWeight: '700',
   },
-  buttonDisabled: {
-    backgroundColor: '#21262d',
-    opacity: 0.5,
+  stageBar: {
+    backgroundColor: '#161b22',
+    paddingHorizontal: 16,
+    paddingVertical: 8,
+    borderBottomWidth: 1,
+    borderBottomColor: '#30363d',
+  },
+  stageIndicator: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 8,
+  },
+  stageTitle: {
+    color: '#58a6ff',
+    fontSize: 12,
+    fontWeight: '700',
+    letterSpacing: 0.5,
+  },
+  proposalBody: {
+    marginTop: 8,
+  },
+  proposalObjectiveRow: {
+    marginBottom: 8,
+  },
+  proposalObjectiveLabel: {
+    color: '#8b949e',
+    fontSize: 11,
+    fontWeight: '700',
+  },
+  proposalObjectiveText: {
+    color: '#f0f6fc',
+    fontSize: 14,
+    fontWeight: '600',
+    marginTop: 2,
+  },
+  proposalBadgeRow: {
+    flexDirection: 'row',
+    gap: 8,
+    marginBottom: 10,
+    flexWrap: 'wrap',
+  },
+  complexityBadge: {
+    backgroundColor: '#23863622',
+    borderWidth: 1,
+    borderColor: '#238636',
+    borderRadius: 6,
+    paddingHorizontal: 8,
+    paddingVertical: 3,
+  },
+  complexityBadgeText: {
+    color: '#3fb950',
+    fontSize: 11,
+    fontWeight: '700',
+  },
+  toolsBadge: {
+    backgroundColor: '#1f6feb22',
+    borderWidth: 1,
+    borderColor: '#1f6feb',
+    borderRadius: 6,
+    paddingHorizontal: 8,
+    paddingVertical: 3,
+  },
+  toolsBadgeText: {
+    color: '#58a6ff',
+    fontSize: 11,
+    fontWeight: '600',
+  },
+  proposalSection: {
+    marginBottom: 10,
+  },
+  proposalSectionLabel: {
+    color: '#8b949e',
+    fontSize: 11,
+    fontWeight: '700',
+    marginBottom: 4,
+  },
+  proposalSectionText: {
+    color: '#c9d1d9',
+    fontSize: 12,
+    lineHeight: 16,
+  },
+  stepItemRow: {
+    flexDirection: 'row',
+    gap: 8,
+    backgroundColor: '#0d1117',
+    padding: 8,
+    borderRadius: 6,
+    marginBottom: 6,
+    borderWidth: 1,
+    borderColor: '#30363d',
+  },
+  stepNumberBadge: {
+    backgroundColor: '#1f6feb',
+    color: '#ffffff',
+    width: 20,
+    height: 20,
+    borderRadius: 10,
+    textAlign: 'center',
+    lineHeight: 20,
+    fontSize: 11,
+    fontWeight: '700',
+  },
+  stepDescriptionText: {
+    color: '#f0f6fc',
+    fontSize: 12,
+    fontWeight: '600',
+  },
+  stepToolText: {
+    color: '#8b949e',
+    fontSize: 10,
+    marginTop: 2,
+  },
+  riskAlertBox: {
+    backgroundColor: '#d2992222',
+    borderColor: '#d29922',
+    borderWidth: 1,
+    borderRadius: 6,
+    padding: 8,
+    marginTop: 4,
+    marginBottom: 8,
+  },
+  riskAlertText: {
+    color: '#e3b341',
+    fontSize: 11,
+    fontWeight: '600',
   },
 });

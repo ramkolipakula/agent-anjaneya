@@ -546,11 +546,11 @@ export default function Home() {
             <div>
               <div className="flex items-center gap-2">
                 <h1 className="text-xl font-bold tracking-tight text-white">Agent Anjaneya</h1>
-                <span className="bg-blue-500/20 text-blue-400 border border-blue-500/30 text-[11px] font-mono px-2 py-0.5 rounded-full font-semibold">
-                  Phase 2 Engine
+                <span className="bg-purple-500/20 text-purple-400 border border-purple-500/30 text-[11px] font-mono px-2 py-0.5 rounded-full font-semibold">
+                  Phase 3 Multi-Agent
                 </span>
               </div>
-              <p className="text-xs text-slate-400 mt-0.5">Desktop Task Execution &amp; Permissioned Security Boundary</p>
+              <p className="text-xs text-slate-400 mt-0.5">Multi-Agent Intelligence, Autonomous Planning &amp; Desktop Execution</p>
             </div>
           </div>
 

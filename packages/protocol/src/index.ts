@@ -1,3 +1,5 @@
+import { z } from "zod";
+
 export type DeviceType = "MOBILE" | "DESKTOP";
 
 export type DeviceStatus = "ONLINE" | "OFFLINE" | "CONNECTING" | "RECONNECTING";
@@ -38,7 +40,9 @@ export type MessageType =
   | "TASK_SYNC_RESPONSE"
   | "HEARTBEAT"
   | "PAIRING_SUCCESSFUL"
-  | "ERROR";
+  | "ERROR"
+  | "AGENT_ACTIVITY"
+  | "TASK_PROPOSAL_READY";
 
 export interface RealtimeMessage<T = any> {
   id: string;
@@ -128,7 +132,14 @@ export interface TaskEvent {
 
 export interface TaskPlan {
   taskId: string;
-  intent: "VIDEO_TRIM" | "FIND_FILE" | "GET_METADATA" | "LIST_DIRECTORIES" | "UNSUPPORTED";
+  intent:
+    | "VIDEO_TRIM"
+    | "FIND_FILE"
+    | "GET_METADATA"
+    | "LIST_DIRECTORIES"
+    | "SOFTWARE_DEVELOPMENT"
+    | "MULTI_AGENT_PROPOSAL"
+    | "UNSUPPORTED";
   title: string;
   sourceFile?: string;
   targetDirectory?: string;
@@ -140,6 +151,7 @@ export interface TaskPlan {
   requiresApproval: boolean;
   toolName: string;
   toolInput: Record<string, any>;
+  proposal?: FinalProposal;
   verification?: {
     expectedDuration?: number;
     expectedMinSize?: number;
@@ -156,6 +168,7 @@ export interface TaskApprovalRequestPayload {
   outputFile?: string;
   details?: string;
   requiresApproval: true;
+  proposal?: FinalProposal;
   timestamp: string;
 }
 
@@ -236,6 +249,8 @@ export const ALLOWED_MESSAGE_TYPES: ReadonlyArray<MessageType> = [
   "HEARTBEAT",
   "PAIRING_SUCCESSFUL",
   "ERROR",
+  "AGENT_ACTIVITY",
+  "TASK_PROPOSAL_READY",
 ];
 
 const VALID_TRANSITIONS: Record<TaskStatus, TaskStatus[]> = {
@@ -287,4 +302,217 @@ export function validateRealtimeMessage(data: any): { valid: boolean; error?: st
     return { valid: false, error: "targetDeviceId is required" };
   }
   return { valid: true };
+}
+
+// ============================================================================
+// PHASE 3: MULTI-AGENT INTELLIGENCE & AUTONOMOUS PLANNING SCHEMAS & TYPES
+// ============================================================================
+
+export type TaskCategory =
+  | "FILE_OPERATION"
+  | "MEDIA_PROCESSING"
+  | "SOFTWARE_DEVELOPMENT"
+  | "RESEARCH"
+  | "PRODUCTIVITY"
+  | "CALENDAR"
+  | "NOTIFICATION"
+  | "UNSUPPORTED";
+
+export const taskCategorySchema = z.enum([
+  "FILE_OPERATION",
+  "MEDIA_PROCESSING",
+  "SOFTWARE_DEVELOPMENT",
+  "RESEARCH",
+  "PRODUCTIVITY",
+  "CALENDAR",
+  "NOTIFICATION",
+  "UNSUPPORTED",
+]);
+
+export const taskClassificationSchema = z.object({
+  category: taskCategorySchema,
+  intent: z.string(),
+  requiredCapabilities: z.array(z.string()),
+  requiredTools: z.array(z.string()),
+  requiresContextGathering: z.boolean(),
+  requiresClarification: z.boolean(),
+  requiresApproval: z.boolean(),
+  isSimpleDeterministic: z.boolean(),
+  complexity: z.enum(["LOW", "MEDIUM", "HIGH"]),
+  safetyRisk: z.enum(["LOW", "MEDIUM", "HIGH", "CRITICAL"]),
+  reasoning: z.string(),
+});
+export type TaskClassification = z.infer<typeof taskClassificationSchema>;
+
+export type AgentRole =
+  | "TASK_ANALYST"
+  | "PLANNER"
+  | "TECHNICAL_SPECIALIST"
+  | "CRITIC"
+  | "JUDGE";
+
+export const agentRoleSchema = z.enum([
+  "TASK_ANALYST",
+  "PLANNER",
+  "TECHNICAL_SPECIALIST",
+  "CRITIC",
+  "JUDGE",
+]);
+
+export const agentAnalysisSchema = z.object({
+  role: z.literal("TASK_ANALYST"),
+  taskId: z.string(),
+  objective: z.string(),
+  extractedConstraints: z.array(z.string()),
+  missingInformation: z.array(z.string()),
+  requiresClarification: z.boolean(),
+  clarificationQuestion: z.string().optional(),
+  relevantContextKeys: z.array(z.string()),
+  estimatedComplexity: z.enum(["LOW", "MEDIUM", "HIGH"]),
+  reasoning: z.string(),
+});
+export type AgentAnalysis = z.infer<typeof agentAnalysisSchema>;
+
+export const candidatePlanStepSchema = z.object({
+  stepId: z.string(),
+  tool: z.string(),
+  description: z.string(),
+  input: z.record(z.string(), z.any()).optional(),
+  dependencies: z.array(z.string()),
+  risk: z.enum(["LOW", "MEDIUM", "HIGH", "CRITICAL"]),
+});
+export type CandidatePlanStep = z.infer<typeof candidatePlanStepSchema>;
+
+export const candidatePlanSchema = z.object({
+  planId: z.string(),
+  title: z.string(),
+  objective: z.string(),
+  steps: z.array(candidatePlanStepSchema),
+  estimatedComplexity: z.enum(["LOW", "MEDIUM", "HIGH"]),
+  requiresApproval: z.boolean(),
+  expectedOutputs: z.array(z.string()),
+  rationale: z.string(),
+});
+export type CandidatePlan = z.infer<typeof candidatePlanSchema>;
+
+export const technicalSpecialistReviewSchema = z.object({
+  role: z.literal("TECHNICAL_SPECIALIST"),
+  compatibleTools: z.array(z.string()),
+  implementationDetails: z.array(z.string()),
+  potentialIssues: z.array(z.string()),
+  executionConstraints: z.array(z.string()),
+  recommendedApproach: z.string(),
+});
+export type TechnicalSpecialistReview = z.infer<typeof technicalSpecialistReviewSchema>;
+
+export const critiqueIssueSchema = z.object({
+  type: z.enum([
+    "LOGICAL_ERROR",
+    "SECURITY_RISK",
+    "UNNECESSARY_OPERATION",
+    "MISSING_STEP",
+    "UNSUPPORTED_ASSUMPTION",
+  ]),
+  severity: z.enum(["LOW", "MEDIUM", "HIGH", "CRITICAL"]),
+  targetPlanId: z.string(),
+  stepId: z.string().optional(),
+  description: z.string(),
+  recommendation: z.string(),
+});
+export type CritiqueIssue = z.infer<typeof critiqueIssueSchema>;
+
+export const critiqueSchema = z.object({
+  role: z.literal("CRITIC"),
+  evaluatedPlanIds: z.array(z.string()),
+  issues: z.array(critiqueIssueSchema),
+  overallVerdict: z.enum(["ACCEPTABLE", "NEEDS_REVISION", "REJECTED_UNSAFE"]),
+  summary: z.string(),
+});
+export type Critique = z.infer<typeof critiqueSchema>;
+
+export const planEvaluationSchema = z.object({
+  planId: z.string(),
+  score: z.number().min(0).max(100),
+  isSafe: z.boolean(),
+  strengths: z.array(z.string()),
+  weaknesses: z.array(z.string()),
+  verdict: z.enum(["RECOMMENDED", "VIABLE", "REJECTED"]),
+});
+export type PlanEvaluation = z.infer<typeof planEvaluationSchema>;
+
+export const finalProposalStepSchema = z.object({
+  stepId: z.string(),
+  tool: z.string(),
+  description: z.string(),
+  dependencies: z.array(z.string()),
+  risk: z.enum(["LOW", "MEDIUM", "HIGH", "CRITICAL"]),
+  requiresApproval: z.boolean(),
+  input: z.record(z.string(), z.any()).optional(),
+});
+export type FinalProposalStep = z.infer<typeof finalProposalStepSchema>;
+
+export const finalProposalSchema = z.object({
+  proposalId: z.string(),
+  taskId: z.string(),
+  userObjective: z.string(),
+  relevantContextSummary: z.string(),
+  proposedApproach: z.string(),
+  steps: z.array(finalProposalStepSchema),
+  requiredTools: z.array(z.string()),
+  expectedOutputs: z.array(z.string()),
+  risks: z.array(z.string()),
+  permissionsRequired: z.array(z.string()),
+  requiresApproval: z.boolean(),
+  estimatedComplexity: z.enum(["LOW", "MEDIUM", "HIGH"]),
+  conciseSummary: z.string(),
+  status: z.enum(["PROPOSED", "APPROVED", "REJECTED", "EXECUTING", "COMPLETED", "FAILED"]).default("PROPOSED"),
+});
+export type FinalProposal = z.infer<typeof finalProposalSchema>;
+
+export type AgentActivityStage =
+  | "ANALYZING"
+  | "GATHERING_CONTEXT"
+  | "PLANNING"
+  | "CRITIQUING"
+  | "EVALUATING"
+  | "PROPOSAL_READY"
+  | "WAITING_FOR_APPROVAL"
+  | "EXECUTING"
+  | "VERIFYING"
+  | "COMPLETED"
+  | "FAILED"
+  | "CANCELLED";
+
+export interface AgentActivityPayload {
+  taskId: string;
+  stage: AgentActivityStage;
+  agentRole?: AgentRole;
+  summary: string;
+  evidence?: string;
+  debateRound?: number;
+  metrics?: {
+    tokensUsed?: number;
+    costUsd?: number;
+    latencyMs?: number;
+  };
+  timestamp: string;
+}
+
+export interface ProposalReadyPayload {
+  taskId: string;
+  proposal: FinalProposal;
+  timestamp: string;
+}
+
+export interface PlanningLatencyMetrics {
+  classificationMs: number;
+  contextGatheringMs: number;
+  plannerMs: number;
+  specialistMs: number;
+  criticMs: number;
+  judgeMs: number;
+  totalPlanningMs: number;
+  debateRounds: number;
+  tokensUsed: number;
+  estimatedCostUsd: number;
 }

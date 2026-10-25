@@ -253,13 +253,14 @@ app.prepare().then(() => {
         } catch (e) {
           console.error("[Socket] Failed to persist task:", e);
         }
-      } else if (msg.payload?.taskId && msg.type.startsWith("TASK_")) {
+      } else if (msg.payload?.taskId && (msg.type.startsWith("TASK_") || msg.type === "AGENT_ACTIVITY")) {
         // Persist all subsequent task events and update state machine transitions
         const taskId = msg.payload.taskId;
         try {
           let newStatus: string | undefined;
           if (msg.type === "TASK_RECEIVED") newStatus = "RECEIVED";
           else if (msg.type === "TASK_PLANNING") newStatus = "PLANNING";
+          else if (msg.type === "TASK_PROPOSAL_READY") newStatus = "PLANNING";
           else if (msg.type === "TASK_APPROVAL_REQUEST") newStatus = "WAITING_FOR_APPROVAL";
           else if (msg.type === "TASK_APPROVAL_RESPONSE") newStatus = msg.payload.approved ? "APPROVED" : "CANCELLED";
           else if (msg.type === "TASK_PROGRESS" && msg.payload.status) newStatus = msg.payload.status;
