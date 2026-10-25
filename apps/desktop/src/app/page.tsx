@@ -1,10 +1,10 @@
 "use client";
 
-import { useEffect, useState } from "react";
+import { useEffect, useState, useRef } from "react";
 import { QRCodeSVG } from "qrcode.react";
 import { io, Socket } from "socket.io-client";
 import { DeviceStatus, RealtimeMessage } from "@agent-anjaneya/protocol";
-import { Monitor, Smartphone, RefreshCw, Send, ShieldCheck, Copy, Check } from "lucide-react";
+import { Monitor, Smartphone, RefreshCw, Send, ShieldCheck, Copy, Check, Unlink } from "lucide-react";
 
 const BACKEND_URL = process.env.NEXT_PUBLIC_BACKEND_URL || "http://localhost:3000";
 
@@ -18,61 +18,85 @@ export default function Home() {
   const [connectionStatus, setConnectionStatus] = useState<DeviceStatus>("CONNECTING");
   const [pairingStatus, setPairingStatus] = useState<"WAITING" | "PAIRED">("WAITING");
   const [pairedMobileId, setPairedMobileId] = useState<string | null>(null);
+  const [pairedMobileName, setPairedMobileName] = useState<string>("Ram's Phone");
   const [pairedMobileStatus, setPairedMobileStatus] = useState<"ONLINE" | "OFFLINE">("OFFLINE");
   const [messages, setMessages] = useState<{ time: string; text: string }[]>([]);
   const [copied, setCopied] = useState(false);
+  const [isRefreshing, setIsRefreshing] = useState(false);
 
-  // Initialize client credentials after mount to avoid SSR hydration mismatch
+  // Keep ref to avoid stale closures in socket handlers
+  const deviceIdRef = useRef(deviceId);
+  deviceIdRef.current = deviceId;
+  const pairedMobileIdRef = useRef(pairedMobileId);
+  pairedMobileIdRef.current = pairedMobileId;
+
+  const addMessage = (text: string) => {
+    setMessages((prev) => [...prev, { time: new Date().toLocaleTimeString(), text }]);
+  };
+
+  // Fetch / bootstrap pairing session
+  const fetchPairingSession = async (currentDeviceId?: string, currentSecret?: string) => {
+    setIsRefreshing(true);
+    try {
+      const idToUse = currentDeviceId ?? (typeof window !== "undefined" ? localStorage.getItem("desktopDeviceId") || undefined : undefined);
+      const secretToUse = currentSecret ?? (typeof window !== "undefined" ? localStorage.getItem("desktopDeviceSecret") || undefined : undefined);
+
+      const res = await fetch(`${BACKEND_URL}/api/pairing`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          deviceId: idToUse,
+          deviceSecret: secretToUse,
+          deviceName: "Ram-PC",
+        }),
+      });
+
+      if (!res.ok) {
+        throw new Error(`Failed to initialize pairing: ${res.statusText}`);
+      }
+
+      const data = await res.json();
+      setDeviceId(data.deviceId);
+      setDeviceSecret(data.deviceSecret);
+      localStorage.setItem("desktopDeviceId", data.deviceId);
+      localStorage.setItem("desktopDeviceSecret", data.deviceSecret);
+
+      const qrData = {
+        pairingSessionId: data.pairingSessionId,
+        pairingToken: data.pairingToken,
+        pinCode: data.pinCode,
+        desktopDeviceId: data.deviceId,
+        serverUrl: BACKEND_URL,
+        expiresAt: data.expiresAt,
+      };
+      setPairingPayload(qrData);
+
+      if (data.pairedMobile) {
+        setPairingStatus("PAIRED");
+        setPairedMobileId(data.pairedMobile.deviceId);
+        setPairedMobileName(data.pairedMobile.deviceName || "Ram's Phone");
+        setPairedMobileStatus(data.pairedMobile.status || "OFFLINE");
+        addMessage(`Restored pairing with phone: ${data.pairedMobile.deviceName}`);
+      }
+    } catch (err: any) {
+      console.error("Error creating pairing session:", err);
+      setConnectionStatus("OFFLINE");
+      addMessage("Failed to connect to backend server.");
+    } finally {
+      setIsRefreshing(false);
+    }
+  };
+
+  // Initialize client credentials on mount
   useEffect(() => {
     setIsMounted(true);
     const storedId = localStorage.getItem("desktopDeviceId") || "";
     const storedSecret = localStorage.getItem("desktopDeviceSecret") || "";
     setDeviceId(storedId);
     setDeviceSecret(storedSecret);
+
+    fetchPairingSession(storedId, storedSecret);
   }, []);
-
-  // Request pairing session & bootstrap credentials
-  useEffect(() => {
-    if (!isMounted) return;
-
-    const initDeviceAndPairing = async () => {
-      try {
-        const res = await fetch(`${BACKEND_URL}/api/pairing`, {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({
-            deviceId: deviceId || undefined,
-            deviceSecret: deviceSecret || undefined,
-            deviceName: "Ram-PC",
-          }),
-        });
-
-        if (!res.ok) {
-          throw new Error(`Failed to initialize pairing: ${res.statusText}`);
-        }
-
-        const data = await res.json();
-        setDeviceId(data.deviceId);
-        setDeviceSecret(data.deviceSecret);
-        localStorage.setItem("desktopDeviceId", data.deviceId);
-        localStorage.setItem("desktopDeviceSecret", data.deviceSecret);
-
-        const qrData = {
-          pairingSessionId: data.pairingSessionId,
-          pairingToken: data.pairingToken,
-          desktopDeviceId: data.deviceId,
-          serverUrl: BACKEND_URL,
-          expiresAt: data.expiresAt,
-        };
-        setPairingPayload(qrData);
-      } catch (err: any) {
-        console.error("Error creating pairing session:", err);
-        setConnectionStatus("OFFLINE");
-      }
-    };
-
-    initDeviceAndPairing();
-  }, [isMounted]);
 
   // Establish Authenticated Socket.io Connection
   useEffect(() => {
@@ -116,18 +140,19 @@ export default function Home() {
         setPairingStatus("PAIRED");
         const mobileId = msg.payload?.mobileDeviceId || msg.sourceDeviceId;
         setPairedMobileId(mobileId);
+        setPairedMobileName(msg.payload?.mobileDeviceName || "Ram's Phone");
         setPairedMobileStatus("ONLINE");
         addMessage(`Phone securely paired: ${msg.payload?.mobileDeviceName || mobileId}`);
       }
 
-      if (msg.type === "DEVICE_CONNECTED" && msg.sourceDeviceId !== deviceId) {
+      if (msg.type === "DEVICE_CONNECTED" && msg.sourceDeviceId !== deviceIdRef.current) {
         setPairingStatus("PAIRED");
         setPairedMobileId(msg.sourceDeviceId);
         setPairedMobileStatus("ONLINE");
         addMessage(`Phone connected: ${msg.sourceDeviceId}`);
       }
 
-      if (msg.type === "DEVICE_DISCONNECTED" && msg.sourceDeviceId === pairedMobileId) {
+      if (msg.type === "DEVICE_DISCONNECTED" && msg.sourceDeviceId === pairedMobileIdRef.current) {
         setPairedMobileStatus("OFFLINE");
         addMessage("Phone disconnected (OFFLINE).");
       }
@@ -143,11 +168,11 @@ export default function Home() {
             id: Math.random().toString(36).substring(7),
             type: "TASK_COMPLETED",
             timestamp: new Date().toISOString(),
-            sourceDeviceId: deviceId,
+            sourceDeviceId: deviceIdRef.current,
             targetDeviceId: msg.sourceDeviceId,
             payload: { text: "Hello from your computer." },
           });
-        }, 300);
+        }, 200);
       }
     });
 
@@ -173,15 +198,30 @@ export default function Home() {
     return () => clearInterval(interval);
   }, [socket, connectionStatus, deviceId, pairedMobileId]);
 
-  const addMessage = (text: string) => {
-    setMessages((prev) => [...prev, { time: new Date().toLocaleTimeString(), text }]);
-  };
+  // Auto-refresh pairing session when close to expiring (every 4 minutes)
+  useEffect(() => {
+    if (pairingStatus !== "WAITING") return;
+
+    const interval = setInterval(() => {
+      fetchPairingSession();
+    }, 4 * 60 * 1000);
+
+    return () => clearInterval(interval);
+  }, [pairingStatus]);
 
   const copyPairingCode = () => {
     if (!pairingPayload) return;
     navigator.clipboard.writeText(JSON.stringify(pairingPayload));
     setCopied(true);
     setTimeout(() => setCopied(false), 2000);
+  };
+
+  const handleUnpair = () => {
+    setPairingStatus("WAITING");
+    setPairedMobileId(null);
+    setPairedMobileStatus("OFFLINE");
+    addMessage("Unpaired phone. Ready to pair new device.");
+    fetchPairingSession();
   };
 
   if (!isMounted) {
@@ -210,7 +250,7 @@ export default function Home() {
           <div className="flex items-center gap-2.5">
             <ShieldCheck className="text-blue-400" size={18} />
             <span>
-              <strong>Phase 1.1 Foundation:</strong> Desktop Client (Web / Bridge Preview). Authenticated WebSocket &amp; Atomic QR Pairing active.
+              <strong>Phase 1.1 Foundation:</strong> Desktop Client (Bridge / Preview). Authenticated WebSocket &amp; Atomic QR Pairing active.
             </span>
           </div>
           <span className="bg-blue-500/10 text-blue-400 border border-blue-500/20 px-2 py-0.5 rounded font-mono">
@@ -221,14 +261,24 @@ export default function Home() {
         <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
           {/* Left Column - Device Info & Pairing */}
           <div className="bg-[#161b22] p-6 rounded-2xl shadow-xl border border-gray-800 flex flex-col gap-5">
-            <div className="flex items-center gap-4 border-b border-gray-800 pb-5">
-              <Monitor size={42} className="text-blue-500" />
-              <div>
-                <h1 className="text-xl font-bold tracking-tight">Ram-PC</h1>
-                <p className="text-gray-400 text-xs font-mono mt-0.5 truncate max-w-[200px]">
-                  ID: {deviceId || "Initializing..."}
-                </p>
+            <div className="flex items-center justify-between border-b border-gray-800 pb-5">
+              <div className="flex items-center gap-4">
+                <Monitor size={42} className="text-blue-500" />
+                <div>
+                  <h1 className="text-xl font-bold tracking-tight">Ram-PC</h1>
+                  <p className="text-gray-400 text-xs font-mono mt-0.5 truncate max-w-[200px]">
+                    ID: {deviceId || "Initializing..."}
+                  </p>
+                </div>
               </div>
+              <button
+                onClick={() => fetchPairingSession()}
+                disabled={isRefreshing}
+                className="p-2 hover:bg-slate-800 rounded-lg transition text-slate-400 hover:text-white"
+                title="Refresh Pairing Code"
+              >
+                <RefreshCw className={`w-4 h-4 ${isRefreshing ? "animate-spin text-blue-400" : ""}`} />
+              </button>
             </div>
 
             <div className="flex justify-between items-center text-sm">
@@ -245,7 +295,7 @@ export default function Home() {
               </div>
             </div>
 
-            <div className="flex flex-col gap-3 items-center justify-center bg-black/40 p-6 rounded-xl border border-gray-800/60 flex-grow">
+            <div className="flex flex-col gap-3 items-center justify-center bg-black/40 p-6 rounded-xl border border-gray-800/60 flex-grow min-h-[320px]">
               {pairingStatus === "WAITING" ? (
                 <>
                   <p className="text-gray-400 text-xs uppercase tracking-widest font-bold mb-1">
@@ -259,7 +309,16 @@ export default function Home() {
                     <RefreshCw className="animate-spin text-gray-500" size={32} />
                   )}
                   
-                  <div className="w-full mt-2 flex flex-col gap-2">
+                  {pairingPayload?.pinCode && (
+                    <div className="bg-gray-800/80 px-4 py-2 rounded-xl border border-blue-500/30 text-center my-1 w-full">
+                      <p className="text-[10px] uppercase tracking-wider text-blue-400 font-bold">Pairing PIN</p>
+                      <p className="text-xl font-mono font-bold tracking-widest text-white">
+                        {pairingPayload.pinCode.slice(0, 3)}-{pairingPayload.pinCode.slice(3)}
+                      </p>
+                    </div>
+                  )}
+
+                  <div className="w-full mt-1 flex flex-col gap-2">
                     <button
                       onClick={copyPairingCode}
                       className="flex items-center justify-center gap-1.5 text-xs text-gray-400 hover:text-white bg-gray-800/60 hover:bg-gray-800 py-1.5 px-3 rounded-lg border border-gray-700/50 transition"
@@ -268,22 +327,22 @@ export default function Home() {
                       <span>{copied ? "Copied Pairing Payload" : "Copy Pairing Code (Fallback)"}</span>
                     </button>
                     <p className="text-gray-500 text-[11px] text-center">
-                      Scan QR or paste code into mobile app
+                      Scan QR, enter PIN, or click 1-Click Connect on mobile
                     </p>
                   </div>
                 </>
               ) : (
-                <div className="flex flex-col items-center text-center gap-3 py-4">
-                  <div className="w-20 h-20 rounded-full bg-blue-500/10 flex items-center justify-center">
+                <div className="flex flex-col items-center text-center gap-4 py-4 w-full">
+                  <div className="w-20 h-20 rounded-full bg-blue-500/10 flex items-center justify-center border border-blue-500/30">
                     <Smartphone size={40} className="text-blue-500" />
                   </div>
                   <div>
-                    <h3 className="text-lg font-bold">Ram&apos;s Phone</h3>
+                    <h3 className="text-lg font-bold">{pairedMobileName}</h3>
                     <p className="text-xs text-gray-400 font-mono mt-0.5">{pairedMobileId}</p>
                     <div className="flex items-center gap-2 justify-center mt-2">
                       <span
                         className={`w-2 h-2 rounded-full ${
-                          pairedMobileStatus === "ONLINE" ? "bg-green-500" : "bg-red-500"
+                          pairedMobileStatus === "ONLINE" ? "bg-green-500 animate-pulse" : "bg-red-500"
                         }`}
                       />
                       <span
@@ -295,6 +354,14 @@ export default function Home() {
                       </span>
                     </div>
                   </div>
+
+                  <button
+                    onClick={handleUnpair}
+                    className="flex items-center gap-1.5 text-xs text-gray-400 hover:text-red-400 bg-gray-800/60 hover:bg-gray-800 py-1.5 px-3 rounded-lg border border-gray-700/50 transition mt-2"
+                  >
+                    <Unlink size={13} />
+                    <span>Unpair / Pair New Phone</span>
+                  </button>
                 </div>
               )}
             </div>
@@ -308,7 +375,7 @@ export default function Home() {
 
             <div className="flex-1 flex flex-col gap-3 overflow-y-auto max-h-[360px] pr-2">
               {messages.length === 0 ? (
-                <p className="text-gray-600 text-xs text-center mt-12">No activity yet. Scan QR to begin.</p>
+                <p className="text-gray-600 text-xs text-center mt-12">No activity yet. Pair mobile phone to begin.</p>
               ) : (
                 messages.map((m, i) => (
                   <div key={i} className="flex flex-col border-l-2 border-blue-500/40 pl-3 py-1">

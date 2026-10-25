@@ -6,11 +6,38 @@ import { DeviceStatus, RealtimeMessage } from '@agent-anjaneya/protocol';
 
 const DEFAULT_BACKEND_URL = Platform.OS === 'web' ? 'http://localhost:3000' : 'http://10.0.2.2:3000';
 
+const storage = {
+  getItem: (key: string): string | null => {
+    try {
+      if (typeof window !== 'undefined' && window.localStorage) {
+        return window.localStorage.getItem(key);
+      }
+    } catch (e) {}
+    return null;
+  },
+  setItem: (key: string, value: string) => {
+    try {
+      if (typeof window !== 'undefined' && window.localStorage) {
+        window.localStorage.setItem(key, value);
+      }
+    } catch (e) {}
+  },
+  removeItem: (key: string) => {
+    try {
+      if (typeof window !== 'undefined' && window.localStorage) {
+        window.localStorage.removeItem(key);
+      }
+    } catch (e) {}
+  },
+};
+
 export default function App() {
   const [permission, requestPermission] = useCameraPermissions();
   const [scanning, setScanning] = useState(false);
   const [manualCode, setManualCode] = useState('');
+  const [pinInput, setPinInput] = useState('');
   const [showManualInput, setShowManualInput] = useState(false);
+  const [showPinInput, setShowPinInput] = useState(false);
   const [pairingError, setPairingError] = useState<string | null>(null);
   const [isPairingLoading, setIsPairingLoading] = useState(false);
 
@@ -18,32 +45,65 @@ export default function App() {
   const [desktopStatus, setDesktopStatus] = useState<'ONLINE' | 'OFFLINE'>('OFFLINE');
   const [desktopDeviceId, setDesktopDeviceId] = useState<string | null>(null);
   const [deviceSecret, setDeviceSecret] = useState<string | null>(null);
-  const [deviceId, setDeviceId] = useState<string>(() => 'mobile-' + Math.random().toString(36).substring(7));
+  const [deviceId, setDeviceId] = useState<string>('mobile-init');
   const [backendUrl, setBackendUrl] = useState(DEFAULT_BACKEND_URL);
 
   const [socket, setSocket] = useState<Socket | null>(null);
   const [messages, setMessages] = useState<{ time: string; text: string; sender: 'user' | 'system'; latency?: number }[]>([]);
   const sentTimeRef = useRef<number | null>(null);
+  const deviceIdRef = useRef<string>(deviceId);
+  deviceIdRef.current = deviceId;
+  const desktopDeviceIdRef = useRef<string | null>(desktopDeviceId);
+  desktopDeviceIdRef.current = desktopDeviceId;
 
   const addMessage = (text: string, sender: 'user' | 'system' = 'system', latency?: number) => {
     setMessages(prev => [...prev, { time: new Date().toLocaleTimeString(), text, sender, latency }]);
   };
 
+  // Restore stored session on mount
+  useEffect(() => {
+    const savedDeviceId = storage.getItem('mobileDeviceId');
+    const savedSecret = storage.getItem('mobileDeviceSecret');
+    const savedDesktopId = storage.getItem('pairedDesktopDeviceId');
+
+    if (savedDeviceId) {
+      setDeviceId(savedDeviceId);
+    } else {
+      const newId = 'mobile-' + Math.random().toString(36).substring(7);
+      setDeviceId(newId);
+      storage.setItem('mobileDeviceId', newId);
+    }
+
+    if (savedSecret && savedDesktopId) {
+      setDeviceSecret(savedSecret);
+      setDesktopDeviceId(savedDesktopId);
+      addMessage(`Restored pairing with ${savedDesktopId}`, 'system');
+    }
+  }, []);
+
   // Perform Pairing Verification
-  const executePairing = async (payload: { pairingSessionId: string; pairingToken: string; serverUrl?: string }) => {
+  const executePairing = async (payload: {
+    pairingSessionId?: string;
+    pairingToken?: string;
+    pinCode?: string;
+    autoPairLocal?: boolean;
+    serverUrl?: string;
+  }) => {
     setIsPairingLoading(true);
     setPairingError(null);
 
     const targetUrl = payload.serverUrl || backendUrl;
 
     try {
-      addMessage('Verifying pairing token with server...', 'system');
+      addMessage('Verifying pairing with server...', 'system');
       const res = await fetch(`${targetUrl}/api/pairing/verify`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
           pairingSessionId: payload.pairingSessionId,
           pairingToken: payload.pairingToken,
+          pinCode: payload.pinCode,
+          autoPairLocal: payload.autoPairLocal,
           mobileDeviceId: deviceId,
           mobileDeviceName: "Ram's Phone",
           mobileDeviceSecret: deviceSecret || undefined,
@@ -54,18 +114,27 @@ export default function App() {
       if (result.success) {
         setDesktopDeviceId(result.desktopDeviceId);
         setDeviceSecret(result.mobileDeviceSecret);
+        setDeviceId(result.mobileDeviceId);
+
+        storage.setItem('mobileDeviceId', result.mobileDeviceId);
+        storage.setItem('mobileDeviceSecret', result.mobileDeviceSecret);
+        storage.setItem('pairedDesktopDeviceId', result.desktopDeviceId);
+
         setDesktopStatus('ONLINE');
         setScanning(false);
         setShowManualInput(false);
+        setShowPinInput(false);
         addMessage(`Securely paired to ${result.desktopDeviceId}`, 'system');
       } else {
-        setPairingError(result.error || 'Pairing verification failed');
-        addMessage(`Pairing failed: ${result.error}`, 'system');
+        const errMsg = result.error || 'Pairing verification failed';
+        setPairingError(errMsg);
+        addMessage(`Pairing failed: ${errMsg}`, 'system');
       }
     } catch (err: any) {
       console.error('Pairing error:', err);
-      setPairingError(`Network error connecting to ${targetUrl}`);
-      addMessage('Network error connecting to backend.', 'system');
+      const errMsg = `Network error connecting to ${targetUrl}`;
+      setPairingError(errMsg);
+      addMessage(errMsg, 'system');
     } finally {
       setIsPairingLoading(false);
     }
@@ -76,7 +145,6 @@ export default function App() {
     try {
       const trimmed = data.trim();
       if (!trimmed.startsWith('{') || !trimmed.endsWith('}')) {
-        // Not a JSON payload, ignore frame silently without breaking
         return;
       }
       const payload = JSON.parse(trimmed);
@@ -86,24 +154,47 @@ export default function App() {
       }
       await executePairing(payload);
     } catch (e) {
-      // Ignore invalid frame parsing
+      // ignore non-json frames
     }
   };
 
   const handleManualPairing = async () => {
     try {
       const trimmed = manualCode.trim();
-      let payload: any;
       if (trimmed.startsWith('{')) {
-        payload = JSON.parse(trimmed);
+        const payload = JSON.parse(trimmed);
+        await executePairing(payload);
       } else {
-        setPairingError('Please paste the complete JSON pairing code or scan the QR code.');
-        return;
+        setPairingError('Please paste the complete JSON pairing code.');
       }
-      await executePairing(payload);
     } catch (e) {
       setPairingError('Invalid JSON format in pairing code.');
     }
+  };
+
+  const handlePinPairing = async () => {
+    const cleanPin = pinInput.trim().replace(/\D/g, '');
+    if (cleanPin.length !== 6) {
+      setPairingError('PIN must be 6 digits (e.g. 123456).');
+      return;
+    }
+    await executePairing({ pinCode: cleanPin });
+  };
+
+  const handleAutoPairLocal = async () => {
+    await executePairing({ autoPairLocal: true });
+  };
+
+  const handleUnpair = () => {
+    storage.removeItem('pairedDesktopDeviceId');
+    storage.removeItem('mobileDeviceSecret');
+    setDesktopDeviceId(null);
+    setDeviceSecret(null);
+    setDesktopStatus('OFFLINE');
+    setConnectionStatus('OFFLINE');
+    if (socket) socket.disconnect();
+    setSocket(null);
+    addMessage('Device unpaired. You can now pair with a computer.', 'system');
   };
 
   // Establish Authenticated Socket.io Connection once paired
@@ -127,7 +218,6 @@ export default function App() {
     newSocket.on('connect', () => {
       console.log('[Socket] Mobile connected to server');
       setConnectionStatus('ONLINE');
-      setDesktopStatus('ONLINE');
       addMessage('Mobile authenticated and connected to server.', 'system');
     });
 
@@ -154,12 +244,12 @@ export default function App() {
         addMessage(`Computer: "${msg.payload?.text}"`, 'system', latency);
       }
 
-      if (msg.type === 'DEVICE_DISCONNECTED' && msg.sourceDeviceId === desktopDeviceId) {
+      if (msg.type === 'DEVICE_DISCONNECTED' && msg.sourceDeviceId === desktopDeviceIdRef.current) {
         setDesktopStatus('OFFLINE');
         addMessage('Computer went OFFLINE.', 'system');
       }
 
-      if (msg.type === 'DEVICE_CONNECTED' && msg.sourceDeviceId === desktopDeviceId) {
+      if (msg.type === 'DEVICE_CONNECTED' && msg.sourceDeviceId === desktopDeviceIdRef.current) {
         setDesktopStatus('ONLINE');
         addMessage('Computer is now ONLINE.', 'system');
       }
@@ -241,6 +331,36 @@ export default function App() {
                 <Text style={styles.buttonText}>Cancel Scanner</Text>
               </TouchableOpacity>
             </View>
+          ) : showPinInput ? (
+            <View style={{ marginTop: 12 }}>
+              <Text style={styles.inputLabel}>Enter 6-Digit Desktop PIN</Text>
+              <TextInput
+                style={[styles.input, { fontSize: 24, textAlign: 'center', letterSpacing: 8, fontWeight: '700' }]}
+                value={pinInput}
+                onChangeText={setPinInput}
+                placeholder="123456"
+                placeholderTextColor="#8b949e"
+                keyboardType="numeric"
+                maxLength={6}
+              />
+              <TouchableOpacity
+                style={styles.buttonPrimary}
+                onPress={handlePinPairing}
+                disabled={isPairingLoading}
+              >
+                {isPairingLoading ? (
+                  <ActivityIndicator color="#fff" />
+                ) : (
+                  <Text style={styles.buttonText}>Connect with PIN</Text>
+                )}
+              </TouchableOpacity>
+              <TouchableOpacity
+                style={[styles.buttonSecondary, { marginTop: 8 }]}
+                onPress={() => setShowPinInput(false)}
+              >
+                <Text style={styles.buttonText}>Back</Text>
+              </TouchableOpacity>
+            </View>
           ) : showManualInput ? (
             <View style={{ marginTop: 12 }}>
               <Text style={styles.inputLabel}>Paste Pairing JSON Code</Text>
@@ -267,20 +387,43 @@ export default function App() {
                 style={[styles.buttonSecondary, { marginTop: 8 }]}
                 onPress={() => setShowManualInput(false)}
               >
-                <Text style={styles.buttonText}>Back to Scanner</Text>
+                <Text style={styles.buttonText}>Back</Text>
               </TouchableOpacity>
             </View>
           ) : (
             <View style={{ gap: 10, marginTop: 12 }}>
+              {/* 1-Click Fast Connect for same-machine testing */}
+              <TouchableOpacity
+                style={[styles.buttonPrimary, { backgroundColor: '#1f6feb' }]}
+                onPress={handleAutoPairLocal}
+                disabled={isPairingLoading}
+              >
+                {isPairingLoading ? (
+                  <ActivityIndicator color="#fff" />
+                ) : (
+                  <Text style={styles.buttonText}>⚡ Quick Connect to Local PC (1-Click)</Text>
+                )}
+              </TouchableOpacity>
+
               <TouchableOpacity
                 style={styles.buttonPrimary}
+                onPress={() => {
+                  setPairingError(null);
+                  setShowPinInput(true);
+                }}
+              >
+                <Text style={styles.buttonText}>🔢 Enter 6-Digit PIN from Desktop</Text>
+              </TouchableOpacity>
+
+              <TouchableOpacity
+                style={styles.buttonSecondary}
                 onPress={async () => {
                   setPairingError(null);
                   if (!permission?.granted) await requestPermission();
                   setScanning(true);
                 }}
               >
-                <Text style={styles.buttonText}>📷 Scan Desktop QR</Text>
+                <Text style={styles.buttonText}>📷 Scan Desktop QR Code</Text>
               </TouchableOpacity>
 
               <TouchableOpacity
@@ -290,7 +433,7 @@ export default function App() {
                   setShowManualInput(true);
                 }}
               >
-                <Text style={styles.buttonText}>⌨️ Enter Pairing Code Manually</Text>
+                <Text style={styles.buttonText}>📋 Paste Pairing Code</Text>
               </TouchableOpacity>
             </View>
           )}
@@ -303,7 +446,7 @@ export default function App() {
   return (
     <View style={styles.container}>
       <View style={styles.headerBar}>
-        <View>
+        <View style={{ flex: 1 }}>
           <Text style={styles.headerTitle}>Ram-PC</Text>
           <Text style={styles.headerSub}>ID: {desktopDeviceId}</Text>
         </View>
@@ -329,6 +472,10 @@ export default function App() {
               PC: {desktopStatus}
             </Text>
           </View>
+
+          <TouchableOpacity style={styles.unpairBadge} onPress={handleUnpair}>
+            <Text style={styles.unpairBadgeText}>Unpair</Text>
+          </TouchableOpacity>
         </View>
       </View>
 
@@ -374,12 +521,11 @@ const styles = StyleSheet.create({
   container: {
     flex: 1,
     backgroundColor: '#0d1117',
+    paddingTop: Platform.OS === 'android' ? 40 : 20,
   },
   header: {
-    paddingTop: 60,
-    paddingHorizontal: 24,
-    paddingBottom: 20,
     alignItems: 'center',
+    paddingVertical: 24,
   },
   title: {
     fontSize: 26,
@@ -393,7 +539,7 @@ const styles = StyleSheet.create({
     marginTop: 4,
   },
   card: {
-    margin: 20,
+    marginHorizontal: 16,
     backgroundColor: '#161b22',
     borderRadius: 16,
     padding: 20,
@@ -409,30 +555,52 @@ const styles = StyleSheet.create({
   },
   input: {
     backgroundColor: '#0d1117',
-    color: '#ffffff',
-    padding: 12,
-    borderRadius: 10,
     borderWidth: 1,
     borderColor: '#30363d',
+    borderRadius: 8,
+    paddingHorizontal: 12,
+    paddingVertical: 10,
+    color: '#ffffff',
     fontSize: 14,
-    marginBottom: 10,
+    marginBottom: 12,
+  },
+  buttonPrimary: {
+    backgroundColor: '#238636',
+    paddingVertical: 14,
+    borderRadius: 8,
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  buttonSecondary: {
+    backgroundColor: '#21262d',
+    borderWidth: 1,
+    borderColor: '#30363d',
+    paddingVertical: 12,
+    borderRadius: 8,
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  buttonText: {
+    color: '#ffffff',
+    fontSize: 14,
+    fontWeight: '600',
   },
   errorBox: {
-    backgroundColor: '#441616',
+    backgroundColor: 'rgba(248, 81, 73, 0.1)',
     borderWidth: 1,
-    borderColor: '#b91c1c',
+    borderColor: '#f85149',
     borderRadius: 8,
     padding: 10,
-    marginVertical: 8,
+    marginBottom: 12,
   },
   errorText: {
-    color: '#f87171',
+    color: '#f85149',
     fontSize: 12,
-    fontWeight: '500',
+    textAlign: 'center',
   },
   cameraWrapper: {
-    height: 320,
-    borderRadius: 14,
+    height: 300,
+    borderRadius: 12,
     overflow: 'hidden',
     marginTop: 10,
   },
@@ -443,97 +611,91 @@ const styles = StyleSheet.create({
     flex: 1,
     justifyContent: 'center',
     alignItems: 'center',
-    padding: 20,
     backgroundColor: '#0d1117',
+    padding: 20,
   },
   infoText: {
-    color: '#c9d1d9',
+    color: '#8b949e',
+    fontSize: 13,
     textAlign: 'center',
-    marginBottom: 16,
-  },
-  buttonPrimary: {
-    backgroundColor: '#238636',
-    paddingVertical: 14,
-    borderRadius: 10,
-    alignItems: 'center',
-  },
-  buttonSecondary: {
-    backgroundColor: '#21262d',
-    paddingVertical: 12,
-    borderRadius: 10,
-    alignItems: 'center',
-    borderWidth: 1,
-    borderColor: '#30363d',
-  },
-  buttonText: {
-    color: '#ffffff',
-    fontWeight: '700',
-    fontSize: 14,
+    marginBottom: 14,
   },
   headerBar: {
-    paddingTop: 50,
-    paddingHorizontal: 20,
-    paddingBottom: 16,
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    paddingHorizontal: 16,
+    paddingVertical: 12,
+    backgroundColor: '#161b22',
     borderBottomWidth: 1,
     borderBottomColor: '#30363d',
-    flexDirection: 'row',
-    justifyContent: 'space-between',
-    alignItems: 'center',
-    backgroundColor: '#161b22',
   },
   headerTitle: {
-    color: '#ffffff',
     fontSize: 18,
     fontWeight: '700',
+    color: '#ffffff',
   },
   headerSub: {
-    color: '#8b949e',
     fontSize: 11,
-    fontFamily: Platform.OS === 'ios' ? 'Menlo' : 'monospace',
+    color: '#8b949e',
+    fontFamily: Platform.OS === 'ios' ? 'Courier' : 'monospace',
+    marginTop: 2,
   },
   statusGroup: {
     flexDirection: 'row',
+    alignItems: 'center',
     gap: 8,
   },
   statusBadge: {
     flexDirection: 'row',
     alignItems: 'center',
-    paddingHorizontal: 10,
-    paddingVertical: 5,
-    borderRadius: 20,
+    paddingHorizontal: 8,
+    paddingVertical: 4,
+    borderRadius: 12,
+    gap: 6,
+  },
+  dot: {
+    width: 6,
+    height: 6,
+    borderRadius: 3,
+  },
+  badgeText: {
+    fontSize: 11,
+    fontWeight: '700',
+  },
+  unpairBadge: {
+    paddingHorizontal: 8,
+    paddingVertical: 4,
+    backgroundColor: '#21262d',
+    borderRadius: 8,
     borderWidth: 1,
     borderColor: '#30363d',
   },
-  dot: {
-    width: 7,
-    height: 7,
-    borderRadius: 3.5,
-    marginRight: 6,
-  },
-  badgeText: {
-    fontWeight: '700',
+  unpairBadgeText: {
+    color: '#f85149',
     fontSize: 11,
+    fontWeight: '600',
   },
   chatArea: {
     flex: 1,
   },
   messageBubble: {
     maxWidth: '85%',
-    padding: 14,
-    borderRadius: 16,
-    marginBottom: 12,
+    padding: 12,
+    borderRadius: 12,
+    marginBottom: 10,
   },
   userBubble: {
-    backgroundColor: '#1f6feb',
     alignSelf: 'flex-end',
-    borderBottomRightRadius: 4,
+    backgroundColor: '#1f6feb',
+    borderBottomRightRadius: 2,
   },
   systemBubble: {
-    backgroundColor: '#161b22',
     alignSelf: 'flex-start',
-    borderBottomLeftRadius: 4,
+    backgroundColor: '#21262d',
     borderWidth: 1,
     borderColor: '#30363d',
+    borderBottomLeftRadius: 2,
   },
   messageText: {
     color: '#ffffff',
@@ -542,22 +704,22 @@ const styles = StyleSheet.create({
   },
   metaRow: {
     flexDirection: 'row',
-    justifyContent: 'flex-end',
+    justifyContent: 'space-between',
     alignItems: 'center',
-    gap: 8,
     marginTop: 4,
+    gap: 8,
   },
   metaTime: {
-    color: '#8b949e',
     fontSize: 10,
+    color: '#8b949e',
   },
   metaLatency: {
-    color: '#34d399',
     fontSize: 10,
+    color: '#7ee787',
     fontWeight: '700',
   },
   footer: {
-    padding: 20,
+    padding: 16,
     backgroundColor: '#161b22',
     borderTopWidth: 1,
     borderTopColor: '#30363d',
@@ -565,16 +727,16 @@ const styles = StyleSheet.create({
   actionButton: {
     backgroundColor: '#238636',
     paddingVertical: 14,
-    borderRadius: 10,
+    borderRadius: 8,
     alignItems: 'center',
-  },
-  buttonDisabled: {
-    backgroundColor: '#30363d',
-    opacity: 0.6,
   },
   actionButtonText: {
     color: '#ffffff',
-    fontWeight: '700',
     fontSize: 15,
+    fontWeight: '700',
+  },
+  buttonDisabled: {
+    backgroundColor: '#21262d',
+    opacity: 0.6,
   },
 });

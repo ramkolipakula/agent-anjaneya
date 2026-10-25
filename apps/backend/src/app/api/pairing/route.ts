@@ -9,6 +9,42 @@ export async function OPTIONS(req: Request) {
   });
 }
 
+// Convenient endpoint to discover active local desktop pairing session
+export async function GET(req: Request) {
+  const cors = getCorsHeaders(req);
+  try {
+    const session = await prisma.pairingSession.findFirst({
+      where: {
+        status: "ACTIVE",
+        expiresAt: { gt: new Date() },
+        pinCode: { not: null },
+      },
+      orderBy: { createdAt: "desc" },
+      include: {
+        desktopDevice: true,
+      },
+    });
+
+    if (!session) {
+      return NextResponse.json({ active: false }, { headers: cors });
+    }
+
+    return NextResponse.json(
+      {
+        active: true,
+        pairingSessionId: session.id,
+        pinCode: session.pinCode,
+        desktopDeviceId: session.desktopDeviceId,
+        desktopDeviceName: session.desktopDevice.deviceName,
+        expiresAt: session.expiresAt.toISOString(),
+      },
+      { headers: cors }
+    );
+  } catch (err) {
+    return NextResponse.json({ active: false }, { status: 500, headers: cors });
+  }
+}
+
 export async function POST(req: Request) {
   const cors = getCorsHeaders(req);
   try {
@@ -32,7 +68,6 @@ export async function POST(req: Request) {
     }
 
     if (!device) {
-      // Register or re-issue secret for this device
       actualDeviceSecret = generateSecureToken(32);
       const secretHash = hashSecret(actualDeviceSecret);
       const newDeviceId = deviceId || "desktop-" + generateSecureToken(6);
@@ -72,6 +107,7 @@ export async function POST(req: Request) {
 
     const pairingToken = generateSecureToken(32);
     const tokenHash = hashSecret(pairingToken);
+    const pinCode = Math.floor(100000 + Math.random() * 900000).toString();
 
     const expiresAt = new Date();
     expiresAt.setMinutes(expiresAt.getMinutes() + 5); // 5 minutes expiry
@@ -80,8 +116,19 @@ export async function POST(req: Request) {
       data: {
         desktopDeviceId: device.id,
         tokenHash,
+        pinCode,
         expiresAt,
         status: "ACTIVE",
+      },
+    });
+
+    const existingConnection = await prisma.deviceConnection.findFirst({
+      where: {
+        desktopDeviceId: device.id,
+        status: "ACTIVE",
+      },
+      include: {
+        mobileDevice: true,
       },
     });
 
@@ -91,8 +138,16 @@ export async function POST(req: Request) {
         deviceSecret: actualDeviceSecret,
         pairingSessionId: session.id,
         pairingToken,
+        pinCode,
         desktopDeviceId: device.id,
         expiresAt: expiresAt.toISOString(),
+        pairedMobile: existingConnection
+          ? {
+              deviceId: existingConnection.mobileDeviceId,
+              deviceName: existingConnection.mobileDevice.deviceName,
+              status: existingConnection.mobileDevice.status,
+            }
+          : null,
       },
       { headers: cors }
     );

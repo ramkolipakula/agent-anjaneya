@@ -1,6 +1,6 @@
 import { NextResponse } from "next/server";
 import prisma from "@/lib/prisma";
-import { generateSecureToken, hashSecret, getCorsHeaders, verifyDeviceCredentials } from "@/lib/auth";
+import { generateSecureToken, hashSecret, getCorsHeaders } from "@/lib/auth";
 
 export async function OPTIONS(req: Request) {
   return new NextResponse(null, {
@@ -12,17 +12,15 @@ export async function OPTIONS(req: Request) {
 export async function POST(req: Request) {
   const cors = getCorsHeaders(req);
   try {
-    const { pairingSessionId, pairingToken, mobileDeviceId, mobileDeviceName, mobileDeviceSecret } =
-      await req.json();
-
-    if (!pairingSessionId || !pairingToken) {
-      return NextResponse.json(
-        { error: "pairingSessionId and pairingToken are required" },
-        { status: 400, headers: cors }
-      );
-    }
-
-    const tokenHash = hashSecret(pairingToken);
+    const {
+      pairingSessionId,
+      pairingToken,
+      pinCode,
+      autoPairLocal,
+      mobileDeviceId,
+      mobileDeviceName,
+      mobileDeviceSecret,
+    } = await req.json();
 
     // Atomic transaction for single-use pairing token consumption and connection creation
     const result = await prisma.$transaction(async (tx) => {
@@ -36,29 +34,74 @@ export async function POST(req: Request) {
         },
       });
 
-      // 2. Fetch session and lock it by checking validity
-      const session = await tx.pairingSession.findUnique({
-        where: { id: pairingSessionId },
-      });
+      // 2. Fetch session based on pairingToken, pinCode, or local discovery
+      let session: any = null;
+
+      if (pinCode) {
+        const cleanPin = String(pinCode).replace(/\D/g, "");
+        session = await tx.pairingSession.findFirst({
+          where: {
+            pinCode: cleanPin,
+            status: "ACTIVE",
+            expiresAt: { gt: new Date() },
+          },
+        });
+      } else if (autoPairLocal) {
+        session = await tx.pairingSession.findFirst({
+          where: {
+            status: "ACTIVE",
+            expiresAt: { gt: new Date() },
+            pinCode: { not: null },
+          },
+          orderBy: { createdAt: "desc" },
+        });
+
+        // Local dev convenience: if no active session but desktop is online, auto-provision
+        if (!session) {
+          const onlineDesktop = await tx.device.findFirst({
+            where: {
+              deviceType: "DESKTOP",
+              status: "ONLINE",
+              lastSeenAt: { gt: new Date(Date.now() - 5 * 60 * 1000) },
+            },
+            orderBy: { lastSeenAt: "desc" },
+          });
+
+          if (onlineDesktop) {
+            session = await tx.pairingSession.create({
+              data: {
+                desktopDeviceId: onlineDesktop.id,
+                tokenHash: hashSecret(generateSecureToken(32)),
+                pinCode: "AUTOPR",
+                expiresAt: new Date(Date.now() + 60 * 1000),
+                status: "ACTIVE",
+              },
+            });
+          }
+        }
+      } else if (pairingSessionId && pairingToken) {
+        const tokenHash = hashSecret(pairingToken);
+        const candidate = await tx.pairingSession.findUnique({
+          where: { id: pairingSessionId },
+        });
+        if (candidate && candidate.tokenHash === tokenHash) {
+          session = candidate;
+        }
+      }
 
       if (!session) {
-        throw new Error("INVALID_SESSION");
+        throw new Error("INVALID_SESSION_OR_PIN");
       }
 
       if (session.status !== "ACTIVE" || session.expiresAt <= new Date()) {
         throw new Error("EXPIRED_OR_USED");
       }
 
-      if (session.tokenHash !== tokenHash) {
-        throw new Error("INVALID_TOKEN");
-      }
-
-      // 3. Atomically consume the token. If another concurrent request beat us, count will be 0.
+      // 3. Atomically consume the session token
       const updateResult = await tx.pairingSession.updateMany({
         where: {
-          id: pairingSessionId,
+          id: session.id,
           status: "ACTIVE",
-          tokenHash: tokenHash,
           expiresAt: { gt: new Date() },
         },
         data: {
@@ -109,7 +152,7 @@ export async function POST(req: Request) {
         });
       }
 
-      // 5. Create or activate DeviceConnection (unique constraint prevents duplicate connections)
+      // 5. Create or activate DeviceConnection
       const connection = await tx.deviceConnection.upsert({
         where: {
           mobileDeviceId_desktopDeviceId: {
@@ -168,11 +211,20 @@ export async function POST(req: Request) {
     const message = error?.message || "Internal Server Error";
 
     let status = 400;
-    if (message === "INVALID_SESSION") status = 404;
-    else if (message === "EXPIRED_OR_USED" || message === "CONCURRENT_CONSUMPTION") status = 409;
-    else if (message === "INVALID_TOKEN") status = 401;
-    else status = 500;
+    let userMessage = message;
+    if (message === "INVALID_SESSION_OR_PIN") {
+      status = 404;
+      userMessage = "No active pairing session found. Please make sure the Desktop app is open and showing a PIN.";
+    } else if (message === "EXPIRED_OR_USED") {
+      status = 409;
+      userMessage = "Pairing session has expired or already been used. Please refresh your Desktop screen for a new PIN.";
+    } else if (message === "CONCURRENT_CONSUMPTION") {
+      status = 409;
+      userMessage = "Pairing code was already consumed by another request.";
+    } else {
+      status = 500;
+    }
 
-    return NextResponse.json({ error: message, success: false }, { status, headers: cors });
+    return NextResponse.json({ error: userMessage, code: message, success: false }, { status, headers: cors });
   }
 }

@@ -43,6 +43,7 @@ model PairingSession {
   desktopDeviceId String
   desktopDevice   Device   @relation(fields: [desktopDeviceId], references: [id])
   tokenHash       String   @unique
+  pinCode         String?
   status          String   @default("ACTIVE")
   expiresAt       DateTime
   usedAt          DateTime?

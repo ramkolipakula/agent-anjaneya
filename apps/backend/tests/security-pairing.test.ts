@@ -288,7 +288,37 @@ async function runTests() {
     data: { status: "OFFLINE" },
   });
   assert.strictEqual(offlineDev.status, "OFFLINE");
-  console.log("✔ Test 8 Passed: Status transitions accurately persist in database.");
+  // Test 9: 6-Digit PIN Code Pairing
+  console.log("\n--- Test 9: 6-Digit PIN Code Pairing ---");
+  const pinSession = await prisma.pairingSession.create({
+    data: {
+      desktopDeviceId: testDesktop.id,
+      tokenHash: hashSecret(generateSecureToken(32)),
+      pinCode: "849210",
+      status: "ACTIVE",
+      expiresAt: new Date(Date.now() + 60000),
+    },
+  });
+
+  // Verify by PIN
+  const matched = await prisma.pairingSession.findFirst({
+    where: { pinCode: "849210", status: "ACTIVE", expiresAt: { gt: new Date() } },
+  });
+  assert(matched !== null, "PIN must locate active session");
+  assert.strictEqual(matched.id, pinSession.id);
+
+  // Consume
+  await prisma.pairingSession.update({
+    where: { id: pinSession.id },
+    data: { status: "USED", usedAt: new Date() },
+  });
+
+  // Verify cannot reuse PIN
+  const reused = await prisma.pairingSession.findFirst({
+    where: { pinCode: "849210", status: "ACTIVE", expiresAt: { gt: new Date() } },
+  });
+  assert.strictEqual(reused, null, "Consumed PIN must not be reusable");
+  console.log("✔ Test 9 Passed: 6-Digit PIN code pairable and single-use enforced.");
 
   console.log("\n=======================================================");
   console.log("🎉 ALL PHASE 1.1 SECURITY & RELIABILITY TESTS PASSED!");

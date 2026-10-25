@@ -81,17 +81,25 @@ app.prepare().then(() => {
       data: { status: "ONLINE", lastSeenAt: new Date() },
     });
 
-    // Notify all active paired connections that this device is ONLINE
+    // Notify all active paired connections and sync counterpart online status
     const connections = await prisma.deviceConnection.findMany({
       where: {
         userId,
         status: "ACTIVE",
         OR: [{ mobileDeviceId: deviceId }, { desktopDeviceId: deviceId }],
       },
+      include: {
+        mobileDevice: true,
+        desktopDevice: true,
+      },
     });
 
     for (const conn of connections) {
-      const targetId = conn.mobileDeviceId === deviceId ? conn.desktopDeviceId : conn.mobileDeviceId;
+      const isMobile = conn.mobileDeviceId === deviceId;
+      const targetId = isMobile ? conn.desktopDeviceId : conn.mobileDeviceId;
+      const targetDevice = isMobile ? conn.desktopDevice : conn.mobileDevice;
+
+      // 1. Notify counterpart that this newly connected device is ONLINE
       io.to(targetId).emit("message", {
         id: Math.random().toString(36).substring(7),
         type: "DEVICE_CONNECTED",
@@ -99,6 +107,19 @@ app.prepare().then(() => {
         sourceDeviceId: deviceId,
         targetDeviceId: targetId,
       } as RealtimeMessage);
+
+      // 2. If counterpart is already online, notify this newly connected device immediately
+      const targetRoom = io.sockets.adapter.rooms.get(targetId);
+      const isTargetOnline = (targetRoom && targetRoom.size > 0) || targetDevice?.status === "ONLINE";
+      if (isTargetOnline) {
+        socket.emit("message", {
+          id: Math.random().toString(36).substring(7),
+          type: "DEVICE_CONNECTED",
+          timestamp: new Date().toISOString(),
+          sourceDeviceId: targetId,
+          targetDeviceId: deviceId,
+        } as RealtimeMessage);
+      }
     }
 
     // Handle incoming messages
@@ -213,7 +234,15 @@ app.prepare().then(() => {
         data: { status: "OFFLINE", lastSeenAt: new Date() },
       });
 
-      for (const conn of connections) {
+      const activeConns = await prisma.deviceConnection.findMany({
+        where: {
+          userId,
+          status: "ACTIVE",
+          OR: [{ mobileDeviceId: deviceId }, { desktopDeviceId: deviceId }],
+        },
+      });
+
+      for (const conn of activeConns) {
         const targetId = conn.mobileDeviceId === deviceId ? conn.desktopDeviceId : conn.mobileDeviceId;
         io.to(targetId).emit("message", {
           id: Math.random().toString(36).substring(7),

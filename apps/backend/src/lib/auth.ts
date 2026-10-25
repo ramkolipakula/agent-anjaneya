@@ -14,10 +14,13 @@ export async function verifyDeviceCredentials(deviceId: string, deviceSecret: st
   const device = await prisma.device.findUnique({
     where: { id: deviceId },
   });
-  if (!device) return null;
+  if (!device || !device.deviceSecretHash) return null;
 
   const secretHash = hashSecret(deviceSecret);
-  if (crypto.timingSafeEqual(Buffer.from(secretHash), Buffer.from(device.deviceSecretHash))) {
+  const secretBuf = Buffer.from(secretHash);
+  const storedBuf = Buffer.from(device.deviceSecretHash);
+
+  if (secretBuf.length === storedBuf.length && crypto.timingSafeEqual(secretBuf, storedBuf)) {
     return device;
   }
   return null;
