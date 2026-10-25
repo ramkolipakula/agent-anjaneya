@@ -8,38 +8,41 @@ datasource db {
 }
 
 model User {
-  id        String   @id @default(uuid())
-  email     String   @unique
-  devices   Device[]
-  tasks     Task[]
-  createdAt DateTime @default(now())
-  updatedAt DateTime @updatedAt
+  id          String             @id @default(uuid())
+  email       String             @unique
+  devices     Device[]
+  connections DeviceConnection[]
+  tasks       Task[]
+  createdAt   DateTime           @default(now())
+  updatedAt   DateTime           @updatedAt
 }
 
 model Device {
-  id          String   @id @default(uuid())
-  userId      String
-  user        User     @relation(fields: [userId], references: [id])
-  deviceType  String
-  deviceName  String
-  platform    String
-  appVersion  String
-  status      String   @default("OFFLINE")
-  lastSeenAt  DateTime @default(now())
-  createdAt   DateTime @default(now())
-  updatedAt   DateTime @updatedAt
+  id               String   @id @default(uuid())
+  userId           String
+  user             User     @relation(fields: [userId], references: [id])
+  deviceType       String
+  deviceName       String
+  platform         String
+  appVersion       String
+  deviceSecretHash String
+  status           String   @default("OFFLINE")
+  lastSeenAt       DateTime @default(now())
+  createdAt        DateTime @default(now())
+  updatedAt        DateTime @updatedAt
 
-  createdTasks Task[] @relation("CreatedTasks")
-  desktopTasks Task[] @relation("DesktopTasks")
-  
+  createdTasks    Task[]             @relation("CreatedTasks")
+  desktopTasks    Task[]             @relation("DesktopTasks")
   pairingSessions PairingSession[]
+  mobileConnections DeviceConnection[] @relation("MobileConnections")
+  desktopConnections DeviceConnection[] @relation("DesktopConnections")
 }
 
 model PairingSession {
   id              String   @id @default(uuid())
   desktopDeviceId String
   desktopDevice   Device   @relation(fields: [desktopDeviceId], references: [id])
-  tokenHash       String
+  tokenHash       String   @unique
   status          String   @default("ACTIVE")
   expiresAt       DateTime
   usedAt          DateTime?
@@ -48,9 +51,17 @@ model PairingSession {
 
 model DeviceConnection {
   id              String   @id @default(uuid())
+  userId          String
+  user            User     @relation(fields: [userId], references: [id])
   mobileDeviceId  String
+  mobileDevice    Device   @relation("MobileConnections", fields: [mobileDeviceId], references: [id])
   desktopDeviceId String
+  desktopDevice   Device   @relation("DesktopConnections", fields: [desktopDeviceId], references: [id])
+  status          String   @default("ACTIVE")
   createdAt       DateTime @default(now())
+  updatedAt       DateTime @updatedAt
+
+  @@unique([mobileDeviceId, desktopDeviceId])
 }
 
 model Task {

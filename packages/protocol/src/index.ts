@@ -24,7 +24,9 @@ export type MessageType =
   | "TASK_PROGRESS"
   | "TASK_COMPLETED"
   | "TASK_FAILED"
-  | "HEARTBEAT";
+  | "HEARTBEAT"
+  | "PAIRING_SUCCESSFUL"
+  | "ERROR";
 
 export interface RealtimeMessage<T = any> {
   id: string;
@@ -33,6 +35,19 @@ export interface RealtimeMessage<T = any> {
   sourceDeviceId: string;
   targetDeviceId: string;
   payload?: T;
+}
+
+export interface DeviceAuthCredentials {
+  deviceId: string;
+  deviceSecret: string;
+}
+
+export interface PairingQRPayload {
+  pairingSessionId: string;
+  pairingToken: string;
+  desktopDeviceId: string;
+  serverUrl?: string;
+  expiresAt: string;
 }
 
 export interface Device {
@@ -58,6 +73,16 @@ export interface PairingSession {
   created_at: string;
 }
 
+export interface DeviceConnection {
+  id: string;
+  userId: string;
+  mobileDeviceId: string;
+  desktopDeviceId: string;
+  status: "ACTIVE" | "REVOKED";
+  createdAt: string;
+  updatedAt: string;
+}
+
 export interface Task {
   id: string;
   user_id: string;
@@ -76,4 +101,42 @@ export interface TaskEvent {
   payload?: any;
   source_device_id: string;
   created_at: string;
+}
+
+export const ALLOWED_MESSAGE_TYPES: ReadonlyArray<MessageType> = [
+  "DEVICE_CONNECTED",
+  "DEVICE_DISCONNECTED",
+  "PING",
+  "PONG",
+  "TASK_CREATED",
+  "TASK_RECEIVED",
+  "TASK_PROGRESS",
+  "TASK_COMPLETED",
+  "TASK_FAILED",
+  "HEARTBEAT",
+  "PAIRING_SUCCESSFUL",
+  "ERROR",
+];
+
+export function isValidMessageType(type: any): type is MessageType {
+  return typeof type === "string" && ALLOWED_MESSAGE_TYPES.includes(type as MessageType);
+}
+
+export function validateRealtimeMessage(data: any): { valid: boolean; error?: string } {
+  if (!data || typeof data !== "object") {
+    return { valid: false, error: "Message must be an object" };
+  }
+  if (!data.id || typeof data.id !== "string") {
+    return { valid: false, error: "Message id must be a string" };
+  }
+  if (!isValidMessageType(data.type)) {
+    return { valid: false, error: `Invalid message type: ${data.type}` };
+  }
+  if (!data.timestamp || typeof data.timestamp !== "string") {
+    return { valid: false, error: "Message timestamp is required" };
+  }
+  if (!data.targetDeviceId || typeof data.targetDeviceId !== "string") {
+    return { valid: false, error: "targetDeviceId is required" };
+  }
+  return { valid: true };
 }

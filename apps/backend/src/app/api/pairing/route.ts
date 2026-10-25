@@ -1,10 +1,18 @@
 import { NextResponse } from "next/server";
 import prisma from "@/lib/prisma";
-import crypto from "crypto";
+import { generateSecureToken, hashSecret, getCorsHeaders, verifyDeviceCredentials } from "@/lib/auth";
+
+export async function OPTIONS(req: Request) {
+  return new NextResponse(null, {
+    status: 204,
+    headers: getCorsHeaders(req),
+  });
+}
 
 export async function POST(req: Request) {
+  const cors = getCorsHeaders(req);
   try {
-    const { deviceId, deviceName } = await req.json();
+    const { deviceId, deviceName, deviceSecret } = await req.json();
 
     // Ensure base user exists
     await prisma.user.upsert({
@@ -16,27 +24,54 @@ export async function POST(req: Request) {
       },
     });
 
-    // Check if device exists, otherwise create it
-    let device = await prisma.device.findUnique({
-      where: { id: deviceId }
-    });
+    let device: any = null;
+    let actualDeviceSecret = deviceSecret;
+
+    if (deviceId && deviceSecret) {
+      device = await verifyDeviceCredentials(deviceId, deviceSecret);
+    }
 
     if (!device) {
-      device = await prisma.device.create({
-        data: {
-          id: deviceId,
-          userId: "user-1", // mock single user for now
+      // Register or re-issue secret for this device
+      actualDeviceSecret = generateSecureToken(32);
+      const secretHash = hashSecret(actualDeviceSecret);
+      const newDeviceId = deviceId || "desktop-" + generateSecureToken(6);
+
+      device = await prisma.device.upsert({
+        where: { id: newDeviceId },
+        update: {
+          deviceName: deviceName || "Desktop",
+          deviceSecretHash: secretHash,
+          status: "ONLINE",
+          lastSeenAt: new Date(),
+        },
+        create: {
+          id: newDeviceId,
+          userId: "user-1",
           deviceType: "DESKTOP",
           deviceName: deviceName || "Desktop",
-          platform: "web",
+          platform: "desktop",
           appVersion: "1.0.0",
-          status: "ONLINE"
-        }
+          deviceSecretHash: secretHash,
+          status: "ONLINE",
+          lastSeenAt: new Date(),
+        },
       });
     }
 
-    const token = crypto.randomBytes(32).toString("hex");
-    const tokenHash = crypto.createHash("sha256").update(token).digest("hex");
+    // Invalidate any previous ACTIVE pairing sessions for this desktop
+    await prisma.pairingSession.updateMany({
+      where: {
+        desktopDeviceId: device.id,
+        status: "ACTIVE",
+      },
+      data: {
+        status: "CANCELLED",
+      },
+    });
+
+    const pairingToken = generateSecureToken(32);
+    const tokenHash = hashSecret(pairingToken);
 
     const expiresAt = new Date();
     expiresAt.setMinutes(expiresAt.getMinutes() + 5); // 5 minutes expiry
@@ -46,16 +81,26 @@ export async function POST(req: Request) {
         desktopDeviceId: device.id,
         tokenHash,
         expiresAt,
-        status: "ACTIVE"
-      }
+        status: "ACTIVE",
+      },
     });
 
-    return NextResponse.json({
-      pairingSessionId: session.id,
-      pairingToken: token
-    });
+    return NextResponse.json(
+      {
+        deviceId: device.id,
+        deviceSecret: actualDeviceSecret,
+        pairingSessionId: session.id,
+        pairingToken,
+        desktopDeviceId: device.id,
+        expiresAt: expiresAt.toISOString(),
+      },
+      { headers: cors }
+    );
   } catch (error) {
-    console.error(error);
-    return NextResponse.json({ error: "Internal Server Error" }, { status: 500 });
+    console.error("Pairing creation error:", error);
+    return NextResponse.json(
+      { error: "Internal Server Error" },
+      { status: 500, headers: cors }
+    );
   }
 }
